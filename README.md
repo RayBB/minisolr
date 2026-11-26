@@ -32,13 +32,24 @@ cargo run --release -- parity ../minisolr/conf tokens.jsonl
 
 ## What it supports
 
-`/solr/openlibrary/select` (GET and POST form) and `/solr/openlibrary/admin/ping`. Plain `q` terms, quoted phrases, `field:term` clauses (any schema field, numeric ones included) joined by AND, a dismax-like match over a `qf` list (`defType=edismax` or a whole-query `{!edismax qf=... v=$param}` wrapper), `fq` of `field:value`, `rows`, `start`, `fl` (names and globs; `*` returns stored and docValues fields, as Solr's `useDocValuesAsStored`), ordering by score or by one numeric field. An undefined field gives a warning; a field the schema defines but no document has matches nothing. Boosts, `pf`, `bf`, `boost` are parsed and ignored, so ranking is plain BM25. Highlighting parameters are ignored. Anything else (ranges, wildcards, OR/NOT, facets, function sorts, `{!terms}`, `{!parent}`, subqueries, updates) returns an empty result with a `warning` in `responseHeader` and a line on stderr.
+`/solr/openlibrary/select` (GET and POST form) and `/solr/openlibrary/admin/ping`. `rows`, `start`, `fl` (names and globs; `*` returns stored and docValues fields, as Solr's `useDocValuesAsStored`), `fq` (any number, parsed like `q`, score 0), ordering by score or by one numeric field (missing values last). Highlighting and spellcheck parameters are ignored.
+
+Query syntax, with Python minisolr's semantics (`src/query/`: `lexer`, `parser` and `ast`, then `compile`, `edismax`, `localparams`, `join`):
+
+- **Lucene classic parser** (the default, or `{!lucene}`): terms, `"phrases"` with `~slop`, `field:term`, `field:"phrase"`, `field:(group)`, nested `( )` groups, `+ - !` prefixes, `AND OR NOT && ||` with the classic default-operator rules (`q.op`, `df`), `*:*`, bare `*`, `field:*` (exists), wildcards `* ?` and prefixes, fuzzy `term~` / `term~1`, boosts `^n` and constant scores `^=n`, backslash escapes, and ranges `[a TO b]`, `{a TO b}`, mixed and with `*` open ends: numeric, string, boolean and date fields, and enum fields in the order of `enumsConfig.xml` (`ebook_access:[borrowable TO *]`).
+- **edismax** (`defType=edismax` or `{!edismax ...}`): `qf` (a `DisjunctionMax` per bare term), `pf`, `pf2`, `pf3`, `ps`, `qs`, `q.op`, `mm` (numbers, percentages, `n<rule` lists), unknown `field:` prefixes searched as text, clauses that analysis empties dropped.
+- **Local params**: `{!edismax}`, `{!dismax}`, `{!lucene}`, `{!tag=...}`, `{!terms f= v= separator=}`, `{!field f=}`, `{!prefix f=}`, `{!parent which= v= filters=}` (an in-memory block join over `_root_`: the child query and filters run over every row and the parents of the matching children match with score 0), `v=` inline or as `$param`, quoted values, text after `}` as `v`, and `_query_:"{!...}"` nested queries.
+- **Parsed but ignored** until step 3: edismax `boost=`, the request `boost` and `bf` (so ranking is plain BM25; `FunctionScoring` in `src/query/mod.rs` is where the function evaluator plugs in). The `[subquery]` and `[child]` `fl` transformers are ignored too (they do not change `numFound`).
+
+An undefined field, a bare term with no default field, a range on a text field, an unknown `{!type}`, malformed local params, facets, grouping, cursors and other sorts return an empty result with a `warning` in `responseHeader` and a line on stderr. A field the schema defines but no document has matches nothing.
 
 ## Analyzers
 
 `text_en_splitting` (whitespace, ICU-style folding, word delimiter with catenation, lowercase, protected words, Porter), `text_international` (standard tokenizer, folding) and `text_general` (standard tokenizer, lowercase). Not done: query-time synonyms; the stop lists are empty in the shipped config. `rust-stemmers` only ships Snowball English (Porter2), which differs from the original Porter that Solr and the Python code use (`odyssey` gives `odyssei`, `one` gives `on`), so `src/porter.rs` is a hand-written Porter (about 220 lines).
 
 ## Measurements (Apple Silicon Mac, host, no Docker, machine under swap pressure)
+
+Query parser (step 2), the 247 answerable requests, 1,300 queries per run, fresh servers and repeated runs: RSS after 1,300 queries 17.7-22.8 MiB, `footprint` 11-12 MiB; RSS stays flat over 3,900 further queries (no growth); p50 1.33-1.51 ms, p95 2.98-3.27 ms. On the old 155-request subset: RSS 12.6 MiB, `footprint` 11 MiB, p50 1.32-1.39 ms, p95 2.96-3.37 ms. `footprint` (dirty memory) is where step 1 was; the higher RSS on the full set comes from the new query shapes (BOOK_SEARCH with a block join and many `qf`/`pf` fields) and is resident but reusable malloc memory. Stripped release binary 4.5 MiB.
 
 Schema-driven version (step 1), same 155-request subset, 1,300 queries, two runs: RSS just after load 8-11 MiB, `footprint` 7-12 MiB; after 1,300 queries RSS 10.6 MiB, `footprint` 10-14 MiB; p50 1.35 ms, p95 2.9-3.0 ms. The hard-coded prototype measured in the same session: 9.8 MiB RSS and 12 MiB `footprint` after 1,300 queries, p50 1.11 ms, p95 2.7 ms. Parsing the schema and indexing every field did not move the memory number beyond noise. The table below is the original prototype measurement.
 
@@ -53,7 +64,7 @@ Same 155-request subset (1,300 queries), host to host. macOS compresses and swap
 
 Stripped release binary 4.0 MiB; 125 crates; first release build 95 s with 2 jobs (largest compiler process 837 MiB RSS).
 
-Correctness on the captured Open Library requests (`tools/replay.py`): 159 of 267 are answerable; `numFound` equals real Solr's on all 159 and the top 10 is the same set on 146; top-10 key overlap 474/510 (92.94%). The prototype answered 155 (142 top-10 equal); the four new ones sort on `ratings_sortable`, a field the hard-coded table lacked. Misses are queries with more than 10 hits where the ignored `boost` function decides the order.
+Correctness on the captured Open Library requests (`tools/replay.py`): 247 of 267 are answerable (every request except 14 function or random sorts and 6 facet requests); `numFound` equals real Solr's on all 247 and the top 10 is the same set on 226; top-10 key overlap 639/696 (91.81%). Python minisolr gets 687/696 on the same 247. All 21 misses are BOOK_SEARCH requests with more than 10 hits where the ignored `boost` function decides the order: with Python's function boosts neutralized, the Rust answers equal Python's on all 247 (numFound, top-10 set and top-10 order). Step 1 answered 159 (146 top-10 equal).
 
 ## Limits
 

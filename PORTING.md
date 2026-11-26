@@ -1,6 +1,6 @@
 # Porting minisolr to Rust: progress and plan
 
-Status: **prototype done; step 1 (schema) done.** This file tracks how far the Rust version is from replacing the Python one in [minisolr](../minisolr), what the prototype showed, and what to do next. Numbers marked *(est.)* are estimates, not measurements.
+Status: **prototype done; step 1 (schema) and step 2 (query parser, edismax) done.** This file tracks how far the Rust version is from replacing the Python one in [minisolr](../minisolr), what the prototype showed, and what to do next. Numbers marked *(est.)* are estimates, not measurements.
 
 ## Why we are doing this
 
@@ -26,31 +26,41 @@ Findings that shape the port:
 
 ## What is covered and what is not
 
-Covered: `/select` (GET and POST) and `/admin/ping`; plain terms, phrases, `field:term` joined by AND; a dismax-like match over `qf`; `fq` of `field:value`; `rows`, `start`, `fl`; ordering by score or one numeric field; three analyzer chains (`text_en_splitting`, `text_international`, `text_general`).
+Covered (after step 2): `/select` (GET and POST) and `/admin/ping`; the schema from `managed-schema.xml` and `enumsConfig.xml`; the Lucene classic parser, edismax, local params (`{!edismax}`, `{!lucene}`, `{!terms}`, `{!field}`, `{!prefix}`, `{!parent}`), `$param` dereference and `_query_`, with Python minisolr's semantics (details in `README.md`); `fq`; `rows`, `start`, `fl`; ordering by score or one numeric field; three analyzer chains (`text_en_splitting`, `text_international`, `text_general`).
 
-The 112 captured requests it cannot answer (they return an empty result with a warning):
+The prototype could not answer 112 captured requests. What they needed:
 
 | Needs | Requests | Fixed by step |
 |---|---|---|
-| Multi-clause `+(...)`, boosted constants, subqueries, `OR` | 76 | 2 |
-| `osp_count` and `trending_score_hourly_sum` fields (not in the hard-coded table) | 14 | 1, but also 2 (see step 1 results) |
-| Sorts on functions, `random_*` or non-table fields | 16 | 4 |
+| Multi-clause `+(...)`, boosted constants, subqueries, `OR` | 76 | 2 (done) |
+| `osp_count` and `trending_score_hourly_sum` fields (not in the hard-coded table) **and** range syntax (`[1 TO *]`, `OR`) | 14 | 1 for the fields, 2 for the ranges (done; the schema alone did not unlock them, see step 1 results) |
+| Sorts on functions, `random_*` or non-table fields | 16 | 4 for the 14 left (the 2 trending carousel requests now fail only on `def(trending_z_score, 0)`; 4 `ratings_sortable` sorts were fixed by step 1) |
 | Facets | 6 | 5 |
 
-Also not done: `/update`, persistence, `/get`, `/export`, nested documents and block join, JSON Request/Facet API, highlighting, spellcheck, query-time synonyms. (Schema XML parsing was added in step 1.)
+Still unanswered after step 2 (20): 6 `def(trending_z_score, 0)`, 4 `def(first_publish_year, 9999)` and 4 `random_1` sorts (step 4), 6 facet requests (step 5).
+
+Also not done: function boosts (`boost`, `bf`: parsed and ignored), `/update`, persistence, `/get`, `/export`, the `[subquery]` and `[child]` transformers, JSON Request/Facet API, highlighting, spellcheck, query-time synonyms.
 
 ## Next steps, in order
 
 Each step has a measurable gate: the language-independent fixtures in `../minisolr/fixtures` (267 replayed requests with real Solr's answers, 66 probes) and the end-to-end harness in `../minisolr/e2e`.
 
-1. [x] **Read the schema.** Parse `managed-schema.xml` and `enumsConfig.xml` (fields, dynamic fields, copyFields, types, enums) instead of the hard-coded table. Likely adds one small XML crate (`roxmltree`). *Gate: the 14 `osp_count`/trending requests answer; parity still 99.86% or better.* About 1-2 days *(est.)*.
+1. [x] **Read the schema.** Parse `managed-schema.xml` and `enumsConfig.xml` (fields, dynamic fields, copyFields, types, enums) instead of the hard-coded table. Likely adds one small XML crate (`roxmltree`). *Gate: the 14 `osp_count`/trending requests answer (wrong as planned: they also need ranges, which step 2 added); parity still 99.86% or better.* About 1-2 days *(est.)*.
    **Done** (`src/schema.rs`, `roxmltree` 0.20, no other crates). Measured:
    - Replay (`tools/replay.py`): 159/267 answerable (was 155), `numFound` equal 159/159, top-10 set equal 146/159 (was 142), key overlap 474/510 = 92.94%. The 4 new answers sort on `ratings_sortable`.
    - The 14 `osp_count`/trending requests do **not** answer yet, and could not with a schema alone: the prototype rejected them on the unknown field first, but all 14 also use range syntax. 12 have `fq=osp_count:[1 TO *] OR readinglog_count:[5 TO *] OR edition_count:[5 TO *]` (ranges plus `OR`), 2 have `trending_score_hourly_sum:[1 TO *] AND readinglog_count:[4 TO *]`, `fq=ebook_access:[borrowable TO *]` (an enum range) and `sort=def(trending_z_score, 0) desc`. They move to step 2 (and step 4 for the two function sorts).
    - Analyzer parity now covers every text field in the dev data, 23 fields including the `title_suggest` copyField: 2,467/2,470 = 99.88% (was 2,114/2,117 over 16 fields); the 3 misses are the known Telugu Mc/Mn case.
    - Memory, same 155-request subset, 1,300 queries: RSS 10.6 MiB, `footprint` 10-14 MiB (hard-coded prototype in the same session: 9.8 MiB, 12 MiB); unchanged within noise. p50 1.35 ms, p95 3.0 ms (prototype 1.11 / 2.7 ms in the same session).
    - Unanswered now (108): 67 `+({!edismax ...})` multi-clause queries, 12 `osp_count` range + `OR` filters, 3 `ebook_access:[borrowable TO *]`, 3 `ia:*`, 3 bare `OR`, 2 trending ranges (step 2); 4 `def(first_publish_year, 9999)`, 4 `def(trending_z_score, 0)`, 4 `random_1` sorts (step 4); 6 facets (step 5).
-2. **Lucene query parser and edismax.** Classic boolean semantics (`+ - AND OR NOT`, groups, ranges, wildcards, fuzzy, slop), local params (`{!edismax}`, `{!terms}`, `{!field}`, `{!prefix}`), `$param` dereference, `qf`/`pf`/`pf2`/`pf3`, `q.op`, `mm`. The biggest piece (Python's `query.py` is 624 lines). *Gate: the 76 multi-clause requests answer.* About 4-6 days *(est.)*.
+2. [x] **Lucene query parser and edismax.** Classic boolean semantics (`+ - AND OR NOT`, groups, ranges, wildcards, fuzzy, slop), local params (`{!edismax}`, `{!terms}`, `{!field}`, `{!prefix}`), `$param` dereference, `qf`/`pf`/`pf2`/`pf3`, `q.op`, `mm`. The biggest piece (Python's `query.py` is 624 lines). *Gate: the 76 multi-clause requests answer.* About 4-6 days *(est.)*.
+   **Done** (`src/query/`: `lexer.rs`, `ast.rs`, `parser.rs`, `localparams.rs`, `compile.rs`, `edismax.rs`, `join.rs`; no new crates). The AST is built once per query string and compiled to Tantivy term, phrase (slop), boolean, boost, const-score, disjunction-max, range, regex, fuzzy, term-set and all queries, as Python does. Also `{!parent}` as an in-memory block join over `_root_`, and `ps`/`qs` (default 0, which is all Python does). Measured:
+   - Replay: 247/267 answerable (was 159), `numFound` equal 247/247, top-10 set equal 226/247, key overlap 639/696 = 91.81%. The 20 unanswered are the 14 function/random sorts (step 4) and 6 facet requests (step 5): every request not blocked by those. That is 2 fewer than the 249 expected, because the 2 trending carousel requests also sort on `def(trending_z_score, 0)`.
+   - All 21 top-10 misses are BOOK_SEARCH requests with more than 10 hits ordered by the ignored edismax `boost` function. Python minisolr gets 687/696 on the same 247; with Python's function boosts neutralized, the Rust answers equal Python's on all 247 (numFound, top-10 set and order). So the parser matches; the gap is step 3.
+   - Probes (`--probes`): 40 of 57 select probes answerable, 38 match; the 2 failures are lifecycle probes that need `/update`; the 17 unanswered are facets, sorts and `cursorMark`.
+   - Analyzer parity unchanged: 2,467/2,470.
+   - Memory and latency on the 247 answerable requests (the old 155-request subset no longer covers what is supported), 1,300 queries: RSS 17.7-22.8 MiB, `footprint` 11-12 MiB, flat over 3,900 more queries; p50 1.33-1.51 ms, p95 2.98-3.27 ms. Old 155 subset on a fresh server: RSS 12.6 MiB, `footprint` 11 MiB, p50 1.39 ms, p95 3.37 ms. Binary 4.5 MiB.
+   - Gates: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` (pedantic), `cargo test --release` (56 unit tests, 3 HTTP tests).
+   - For step 3: `FunctionScoring` in `src/query/mod.rs` holds the edismax `boost=` expressions (collected while compiling, in `Compiler::boosts`), the request `boost` (only when `defType` is not edismax) and `bf`. Python multiplies each hit's score by every boost expression, then adds each `bf` term (`bf` split on whitespace unless it has a `(`), and orders by the result, so the search must score all hits (not only the top `rows`) whenever a function is present. Boosts inside `fq` and the `{!parent}` child query are discarded, as in Python.
 3. **Function queries and boost.** `sum`, `mul`, `div`, `log10`, `def`, `min`, `max`, `field`, `recip`, applied after scoring, plus `bf`. *Gate: top-10 sets equal on the 13 requests that missed; overlap at or above Python's 98.76%.* About 1-2 days *(est.)*.
 4. **Sorting.** Field sorts, function sorts, `random_*` (MD5-based as in Python), ICU-style sort keys, enum order. *Gate: the 16 sort requests.* About 1 day *(est.)*.
 5. **Facets.** `facet.field` (mincount, sort, offset, limit, prefix, zero-count terms, per-document distinct counts), `facet.query`, `json.nl=arrarr`, then the JSON Request and Facet APIs the author updater uses. *Gate: 6/6 facet requests; real `make reindex-solr` indexes authors.* About 2 days *(est.)*.
