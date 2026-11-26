@@ -24,6 +24,8 @@ pub enum Chain {
     International,
     /// Solr `text_general`.
     General,
+    /// Fallback for field types whose analyzer is not implemented: whitespace, lowercase.
+    WhitespaceLowercase,
 }
 
 /// The tokens of one index-time analysis.
@@ -108,6 +110,10 @@ impl Analyzer {
                 .collect(),
             Chain::General => standard_tokenize(text)
                 .into_iter()
+                .map(|t| Pos::single(t.to_lowercase()))
+                .collect(),
+            Chain::WhitespaceLowercase => text
+                .split_whitespace()
                 .map(|t| Pos::single(t.to_lowercase()))
                 .collect(),
         }

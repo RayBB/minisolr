@@ -11,6 +11,10 @@ pub enum Error {
     Json(serde_json::Error),
     /// Tantivy refused an operation.
     Tantivy(tantivy::TantivyError),
+    /// A schema or enums file was not well-formed XML.
+    Xml(roxmltree::Error),
+    /// The schema is well-formed but inconsistent (for example an undefined field type).
+    Schema(String),
     /// The request uses a Solr feature the prototype does not implement.
     Unsupported(String),
     /// Anything else, with a message.
@@ -23,6 +27,8 @@ impl fmt::Display for Error {
             Self::Io(e) => write!(f, "io error: {e}"),
             Self::Json(e) => write!(f, "json error: {e}"),
             Self::Tantivy(e) => write!(f, "tantivy error: {e}"),
+            Self::Xml(e) => write!(f, "xml error: {e}"),
+            Self::Schema(msg) => write!(f, "schema error: {msg}"),
             Self::Unsupported(what) => write!(f, "unsupported: {what}"),
             Self::Other(msg) => f.write_str(msg),
         }
@@ -35,7 +41,8 @@ impl std::error::Error for Error {
             Self::Io(e) => Some(e),
             Self::Json(e) => Some(e),
             Self::Tantivy(e) => Some(e),
-            Self::Unsupported(_) | Self::Other(_) => None,
+            Self::Xml(e) => Some(e),
+            Self::Schema(_) | Self::Unsupported(_) | Self::Other(_) => None,
         }
     }
 }
@@ -55,5 +62,11 @@ impl From<serde_json::Error> for Error {
 impl From<tantivy::TantivyError> for Error {
     fn from(e: tantivy::TantivyError) -> Self {
         Self::Tantivy(e)
+    }
+}
+
+impl From<roxmltree::Error> for Error {
+    fn from(e: roxmltree::Error) -> Self {
+        Self::Xml(e)
     }
 }
