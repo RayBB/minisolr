@@ -80,9 +80,8 @@ pub(super) struct LeafOpts {
 pub(crate) struct Compiler<'p> {
     pub(super) store: &'p Store,
     pub(super) params: &'p Params,
-    /// Step 3 seam: function-query `boost` expressions met while compiling (edismax
-    /// `boost=`, already dereferenced). Python multiplies each hit's score by every one of
-    /// them after the search; for now they are collected and ignored.
+    /// Function-query `boost` expressions met while compiling (edismax `boost=`, already
+    /// dereferenced); `select` multiplies each hit's score by every one of them.
     pub(super) boosts: Vec<String>,
     depth: u32,
 }

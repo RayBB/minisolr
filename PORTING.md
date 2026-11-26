@@ -1,6 +1,6 @@
 # Porting minisolr to Rust: progress and plan
 
-Status: **prototype done; step 1 (schema) and step 2 (query parser, edismax) done.** This file tracks how far the Rust version is from replacing the Python one in [minisolr](../minisolr), what the prototype showed, and what to do next. Numbers marked *(est.)* are estimates, not measurements.
+Status: **prototype done; steps 1 (schema), 2 (query parser, edismax) and 3 (function queries, boost) done, plus the sorts of step 4. The go/no-go checkpoint is [below](#checkpoint-after-step-3).** This file tracks how far the Rust version is from replacing the Python one in [minisolr](../minisolr), what the prototype showed, and what to do next. Numbers marked *(est.)* are estimates, not measurements.
 
 ## Why we are doing this
 
@@ -26,7 +26,7 @@ Findings that shape the port:
 
 ## What is covered and what is not
 
-Covered (after step 2): `/select` (GET and POST) and `/admin/ping`; the schema from `managed-schema.xml` and `enumsConfig.xml`; the Lucene classic parser, edismax, local params (`{!edismax}`, `{!lucene}`, `{!terms}`, `{!field}`, `{!prefix}`, `{!parent}`), `$param` dereference and `_query_`, with Python minisolr's semantics (details in `README.md`); `fq`; `rows`, `start`, `fl`; ordering by score or one numeric field; three analyzer chains (`text_en_splitting`, `text_international`, `text_general`).
+Covered (after step 3): `/select` (GET and POST) and `/admin/ping`; the schema from `managed-schema.xml` and `enumsConfig.xml`; the Lucene classic parser, edismax, local params (`{!edismax}`, `{!lucene}`, `{!terms}`, `{!field}`, `{!prefix}`, `{!parent}`), `$param` dereference and `_query_`, with Python minisolr's semantics (details in `README.md`); `fq`; `rows`, `start`, `fl`; function queries in edismax `boost`, the request `boost` and `bf`; multi-key `sort` on score, fields (numbers, strings, enum order, folded `sort_text`), functions and `random_*`; three analyzer chains (`text_en_splitting`, `text_international`, `text_general`).
 
 The prototype could not answer 112 captured requests. What they needed:
 
@@ -37,9 +37,9 @@ The prototype could not answer 112 captured requests. What they needed:
 | Sorts on functions, `random_*` or non-table fields | 16 | 4 for the 14 left (the 2 trending carousel requests now fail only on `def(trending_z_score, 0)`; 4 `ratings_sortable` sorts were fixed by step 1) |
 | Facets | 6 | 5 |
 
-Still unanswered after step 2 (20): 6 `def(trending_z_score, 0)`, 4 `def(first_publish_year, 9999)` and 4 `random_1` sorts (step 4), 6 facet requests (step 5).
+Still unanswered after step 3 (6): the 6 facet requests (step 5).
 
-Also not done: function boosts (`boost`, `bf`: parsed and ignored), `/update`, persistence, `/get`, `/export`, the `[subquery]` and `[child]` transformers, JSON Request/Facet API, highlighting, spellcheck, query-time synonyms.
+Also not done: `cursorMark`, `/update`, persistence, `/get`, `/export`, the `[subquery]` and `[child]` transformers, JSON Request/Facet API, highlighting, spellcheck, query-time synonyms.
 
 ## Next steps, in order
 
@@ -61,22 +61,56 @@ Each step has a measurable gate: the language-independent fixtures in `../miniso
    - Memory and latency on the 247 answerable requests (the old 155-request subset no longer covers what is supported), 1,300 queries: RSS 17.7-22.8 MiB, `footprint` 11-12 MiB, flat over 3,900 more queries; p50 1.33-1.51 ms, p95 2.98-3.27 ms. Old 155 subset on a fresh server: RSS 12.6 MiB, `footprint` 11 MiB, p50 1.39 ms, p95 3.37 ms. Binary 4.5 MiB.
    - Gates: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` (pedantic), `cargo test --release` (56 unit tests, 3 HTTP tests).
    - For step 3: `FunctionScoring` in `src/query/mod.rs` holds the edismax `boost=` expressions (collected while compiling, in `Compiler::boosts`), the request `boost` (only when `defType` is not edismax) and `bf`. Python multiplies each hit's score by every boost expression, then adds each `bf` term (`bf` split on whitespace unless it has a `(`), and orders by the result, so the search must score all hits (not only the top `rows`) whenever a function is present. Boosts inside `fq` and the `{!parent}` child query are discarded, as in Python.
-3. **Function queries and boost.** `sum`, `mul`, `div`, `log10`, `def`, `min`, `max`, `field`, `recip`, applied after scoring, plus `bf`. *Gate: top-10 sets equal on the 13 requests that missed; overlap at or above Python's 98.76%.* About 1-2 days *(est.)*.
-4. **Sorting.** Field sorts, function sorts, `random_*` (MD5-based as in Python), ICU-style sort keys, enum order. *Gate: the 16 sort requests.* About 1 day *(est.)*.
+3. [x] **Function queries and boost.** `sum`, `mul`, `div`, `log10`, `def`, `min`, `max`, `field`, `recip`, applied after scoring, plus `bf`. *Gate: top-10 sets equal on the 13 requests that missed; overlap at or above Python's 98.76%.* About 1-2 days *(est.)*.
+   **Done** (`src/function/`: `ast.rs`, `parse.rs`, `eval.rs`, `mod.rs`; no new crates). Python's `eval_fn` read the same way (a name, then everything to the last `)`; arguments split on commas outside parentheses; otherwise `score`, a number or a field) and its whole table: `sum`/`add`, `sub`, `mul`/`product`, `div` (0 on division by 0), `log` (base 10) and `ln` (0 for x <= 0), `sqrt`, `pow`, `abs`, `min`, `max`, `recip`, `if`, `def` (a field with a default; a non-field first argument is evaluated and the default ignored), `exists`. Fields read the stored row, first value of a list, numbers only. An unknown function warns on stderr and is 0, as in Python. Added over Python: a `$name` argument is replaced by the request parameter. Each hit's score is multiplied by every `boost` expression in turn (edismax `boost=`, plus the request `boost` when `defType` is not edismax), then each `bf` term is added (split on whitespace unless it contains `(`); boosts inside `fq` and the `{!parent}` child query are dropped. With a function or a sort, every hit is scored before the page is taken. Measured: see the checkpoint.
+4. [ ] **Sorting.** Field sorts, function sorts, `random_*` (MD5-based as in Python), ICU-style sort keys, enum order. *Gate: the 16 sort requests.* About 1 day *(est.)*.
+   - [x] **Done with step 3** (`src/query/sort.rs`, `src/md5.rs`): Python's `apply_sort` (comma-separated keys, direction after the last space, one stable sort per key from last to first starting in index order, missing values last in both directions), on `score`, numbers, strings (code point order; names outside the schema lowercased), enums in `enumsConfig.xml` order, `sort_text` fields by the same folding as the analyzers, functions (`def(trending_z_score, 0)`, `def(first_publish_year, 9999)`) and `random_<seed>` (first 4 bytes of the MD5 of the name and the document key, a hand-written 90-line MD5 checked against the RFC 1321 vectors). All 14 sort requests and the 6 sort probes answer.
+   - [ ] Left: `cursorMark` (1 probe). Real ICU collation is not planned; Python approximates it the same way.
 5. **Facets.** `facet.field` (mincount, sort, offset, limit, prefix, zero-count terms, per-document distinct counts), `facet.query`, `json.nl=arrarr`, then the JSON Request and Facet APIs the author updater uses. *Gate: 6/6 facet requests; real `make reindex-solr` indexes authors.* About 2 days *(est.)*.
 6. **Updates and persistence.** `/update` (repeated-key command bodies, arrays, atomic `set add add-distinct remove inc`, delete by id and query, commit), JSONL store with lazy index rebuild, `/get`, `/export`, nested `editions` children with the in-memory `{!parent}` block join and `[subquery]`/`[child]`. *Gate: 447-doc reindex, lifecycle probes, `/get` 41/41, restart persistence.* About 3-4 days *(est.)*.
 7. **Remaining analysis.** Query-time synonyms and `synonymGraph`, full `wordDelimiterGraph` positions, a Mc/Mn category table, non-English chains if any field needs them. *Gate: analyzer parity 100% on all fields.* About 1-2 days *(est.)*.
 8. **Highlighting and spellcheck** (basic versions, as in Python). About 1 day *(est.)*.
 9. **Packaging.** Static musl build, scratch or Alpine image, compose override that selects the Rust image, an `--engine` switch in the e2e harness. *Gate: `all-minisolr` passes with the Rust server: smoke 86/86, replay 267/267, probes 66/66, `solr-updater` daemon, restart persistence.* About 1-2 days *(est.)*.
 
-Remaining total: roughly **15-22 working days** *(est.)* for someone fluent in Rust. The prototype covers about 40% of the captured requests but only a small part of the work: the parser, boost, facets and updates are most of it.
+Remaining total after step 3: roughly **8-12 working days** *(est.)*: facets 2, updates, persistence and nested documents 3-4, analysis 1-2, highlighting and spellcheck 1, packaging 1-2, `cursorMark` under half a day. The original estimate for steps 1-3 was 6-10 days.
+
+## Checkpoint after step 3
+
+The go/no-go checkpoint planned below ("after step 3, rerun the replay; stop if the answerable share is not near 100% or memory has drifted up"). Measured on the Apple Silicon Mac, host, no Docker, under heavy swap pressure (8.8 of 10 GB swap in use).
+
+| Measure | Result | Bar |
+|---|---|---|
+| Replay answerable | **261 of 267**; the 6 left are the facet requests (step 5) | near 100% |
+| `numFound` equal to Solr | 261/261 | 267/267 at the end |
+| Top-10 set equal to Solr | 252/261; key overlap 715/724 = **98.76%** | at or above 90%; Python 98.76% |
+| Same answers as Python minisolr | numFound, top-10 set **and top-10 order identical on 261/261** (`tools/compare_python.py`); with Python's boosts neutralized only 216/261 orders agree, so the boosts are exercised | |
+| Probes (`--probes`) | 49 of 57 select probes answerable, 47 match; the 2 failures need `/update` (step 6); unanswered: 7 facets, 1 `cursorMark` | 66/66 at the end |
+| Analyzer parity | 2,467/2,470 (99.88%), unchanged | 100% after step 7 |
+| Memory, 1,300 queries over the 261 | RSS 23.3-23.7 MiB, `footprint` 10-14 MiB (fresh servers); RSS 20.4-23.2 MiB, `footprint` 9-13 MiB over 5,200 more | below 20 MiB |
+| Latency | p50 1.39-1.51 ms, p95 3.02-3.25 ms | p95 below 10 ms |
+| Binary | 4.4 MiB stripped; crates unchanged (tantivy, serde_json, unicode-normalization, tiny_http, roxmltree) | |
+| Code | 6,136 lines in `src/` with tests and doc comments; 3,542 lines of code outside tests. Python minisolr: 1,936 lines (1,644 of code) for the whole server, including facets, updates, persistence, highlighting and spellcheck. Step 3 added about 1,290 lines (with the HTTP test), about 40% of them tests | |
+| Gates | `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` (pedantic), `cargo test --release`: 79 unit tests, 4 HTTP tests | |
+
+The 9 top-10 misses against Solr are the same 9 for Python and Rust (BOOK_SEARCH `language:eng`, `subject:"lending library"` and `the`, 9 of 10 keys each), so they are minisolr semantics, not port bugs.
+
+**Is the RSS rise real growth?** No. Step 2 saw RSS go from 10.6 MiB (step 1) to 17.7-22.8 MiB. `heap` shows the live malloc heap at 1.98 MB just after load and 1.99 MB after 1,300 and after 6,500 queries, with the same 20,445 live allocations after 1,300 and 6,500: nothing accumulates. RSS climbs from about 10 MiB at load to about 21 MiB in the first few hundred queries and then stays flat or drops. `vmmap` puts the difference in freed `MALLOC_MEDIUM` regions that macOS keeps resident (4-5 MiB in "empty" medium regions) and in the tiny/nano zones: allocator slack from per-query buffers of 32 KiB and up (the BOOK_SEARCH shapes with many `qf`/`pf` fields and the block join), which `footprint` (dirty memory, 9-14 MiB) does not count. Scoring every hit when a function is present adds one vector per query the size of the index (447 entries here). On Linux in a container the allocator (glibc or musl) differs, so the number to trust is the one step 9 will measure there.
+
+**Recommendation: go, but reorder the remaining steps and decide on the maintenance cost first.** The technical risk is gone: on everything that is answerable, the Rust server returns exactly what Python minisolr returns, about 4x less dirty memory than Python (9-14 against about 55 MiB `footprint`, host to host) and 2.5x (p50) to 6x (p95) lower latency, with no new crates since step 1. The 20 MiB RSS bar is missed by a few MiB on macOS, but only through reusable allocator slack; `footprint` is well under it. What argues against continuing is not risk but cost and value:
+
+- **Cost.** About 8-12 more days *(est.)*: facets (2), updates, persistence and nested documents (3-4), remaining analysis (1-2), highlighting and spellcheck (1), packaging (1-2). Steps 1-3 needed about as much code per feature as expected; Rust is about 2x Python's lines for the same behaviour.
+- **Value.** Python minisolr already saves about 80% of Solr's memory; Rust saves another 25-30 MiB per development stack. It is worth it only if that matters (small laptops, CI runners, many parallel stacks).
+- **Maintenance.** Two implementations must then agree. The fixtures and `tools/compare_python.py` make that checkable, but every Python minisolr change needs a Rust twin until one of them is retired.
+- **Order.** Do step 6 (updates and persistence) before facets: without `/update` the Rust server cannot run in the dev stack at all (the `solr-updater` writes to it), so it is the step that turns the port into something usable, and the riskiest one left. Then facets, packaging (to get the Linux memory number early), and analysis, highlighting and spellcheck last.
+
+If the extra 25-30 MiB per stack is not worth 2 more weeks and a second implementation, stop here: the result (exact parity on 261 of 267 requests at a third of the memory) is a solid answer to the original question.
 
 ## Decisions to make before step 1
 
 - **Where it lives.** A separate repo (as now), or a `rust/` directory inside minisolr so the fixtures, harness and docs are shared. Sharing is simpler; a separate repo keeps minisolr pure Python.
 - **Dependency budget.** The prototype uses four crates (125 in the tree). Step 1 adds an XML parser. Anything beyond that (a regex engine, an HTTP framework) should be justified; the machine struggles with big builds.
 - **Success bar.** Same as Python: `numFound` equal on 267/267, top-10 overlap at or above 90%, probes 66/66, smoke 86/86. Add: memory below 20 MiB and p95 below 10 ms, otherwise the port is not worth keeping.
-- **Go/no-go checkpoint.** After step 3 (parser, edismax and boost), rerun the replay. If the answerable share is not near 100% or the memory number has drifted up, stop.
+- **Go/no-go checkpoint.** After step 3 (parser, edismax and boost), rerun the replay. If the answerable share is not near 100% or the memory number has drifted up, stop. (Done: see the checkpoint above.)
 
 ## Build budget
 
@@ -84,4 +118,4 @@ Keep builds small: `nice -n 19`, `CARGO_BUILD_JOBS=2`, `cargo check` and `cargo 
 
 ## Tools
 
-`tools/replay.py` (replay against golden, the main progress meter), `tools/bench.py` (RSS, `footprint`, latency) and `tools/dump_tokens.py` (Python tokens for `parity`); usage is in each file's header and in `README.md`.
+`tools/replay.py` (replay against golden, the main progress meter), `tools/compare_python.py` (request-by-request comparison with Python minisolr, with its boosts on or neutralized), `tools/bench.py` (RSS, `footprint`, latency) and `tools/dump_tokens.py` (Python tokens for `parity`); usage is in each file's header and in `README.md`.

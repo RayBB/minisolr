@@ -14,11 +14,13 @@ The first argument is a Solr conf directory with `managed-schema.xml` (and optio
 
 ## Tools
 
-All in `tools/`, Python. `replay.py` and `bench.py` use the standard library only and start nothing.
+All in `tools/`, Python. `replay.py` and `bench.py` use the standard library only and start nothing; `compare_python.py` needs Python minisolr's environment.
 
 ```bash
 # correctness against real Solr's captured answers (the main progress meter)
 python3 tools/replay.py http://127.0.0.1:8983/solr/openlibrary ../minisolr/fixtures [--probes] [-v] [--subset-out answered.json]
+# same answers as Python minisolr? (runs Python minisolr in-process; --neutral turns its boosts off)
+uv run --project ../minisolr python tools/compare_python.py http://127.0.0.1:8983/solr/openlibrary ../minisolr [--neutral]
 # memory and latency over the answerable requests
 python3 tools/bench.py http://127.0.0.1:8983/solr/openlibrary <pid> answered.json 1300
 # analyzer parity with Python minisolr, over every text field in the data
@@ -32,22 +34,26 @@ cargo run --release -- parity ../minisolr/conf tokens.jsonl
 
 ## What it supports
 
-`/solr/openlibrary/select` (GET and POST form) and `/solr/openlibrary/admin/ping`. `rows`, `start`, `fl` (names and globs; `*` returns stored and docValues fields, as Solr's `useDocValuesAsStored`), `fq` (any number, parsed like `q`, score 0), ordering by score or by one numeric field (missing values last). Highlighting and spellcheck parameters are ignored.
+`/solr/openlibrary/select` (GET and POST form) and `/solr/openlibrary/admin/ping`. `rows`, `start`, `fl` (names and globs; `*` returns stored and docValues fields, as Solr's `useDocValuesAsStored`), `fq` (any number, parsed like `q`, score 0), function queries and `sort` (below). Highlighting and spellcheck parameters are ignored.
 
 Query syntax, with Python minisolr's semantics (`src/query/`: `lexer`, `parser` and `ast`, then `compile`, `edismax`, `localparams`, `join`):
 
 - **Lucene classic parser** (the default, or `{!lucene}`): terms, `"phrases"` with `~slop`, `field:term`, `field:"phrase"`, `field:(group)`, nested `( )` groups, `+ - !` prefixes, `AND OR NOT && ||` with the classic default-operator rules (`q.op`, `df`), `*:*`, bare `*`, `field:*` (exists), wildcards `* ?` and prefixes, fuzzy `term~` / `term~1`, boosts `^n` and constant scores `^=n`, backslash escapes, and ranges `[a TO b]`, `{a TO b}`, mixed and with `*` open ends: numeric, string, boolean and date fields, and enum fields in the order of `enumsConfig.xml` (`ebook_access:[borrowable TO *]`).
 - **edismax** (`defType=edismax` or `{!edismax ...}`): `qf` (a `DisjunctionMax` per bare term), `pf`, `pf2`, `pf3`, `ps`, `qs`, `q.op`, `mm` (numbers, percentages, `n<rule` lists), unknown `field:` prefixes searched as text, clauses that analysis empties dropped.
 - **Local params**: `{!edismax}`, `{!dismax}`, `{!lucene}`, `{!tag=...}`, `{!terms f= v= separator=}`, `{!field f=}`, `{!prefix f=}`, `{!parent which= v= filters=}` (an in-memory block join over `_root_`: the child query and filters run over every row and the parents of the matching children match with score 0), `v=` inline or as `$param`, quoted values, text after `}` as `v`, and `_query_:"{!...}"` nested queries.
-- **Parsed but ignored** until step 3: edismax `boost=`, the request `boost` and `bf` (so ranking is plain BM25; `FunctionScoring` in `src/query/mod.rs` is where the function evaluator plugs in). The `[subquery]` and `[child]` `fl` transformers are ignored too (they do not change `numFound`).
+- **Function queries** (`src/function/`): Python minisolr's `eval_fn` table, `sum`/`add`, `sub`, `mul`/`product`, `div`, `log` (base 10), `ln`, `sqrt`, `pow`, `abs`, `min`, `max`, `recip`, `if`, `def`, `exists`, numbers, `score`, field values (first value of a list; non-numbers are 0) and nested calls, plus `$param` arguments. An unknown function warns on stderr and evaluates to 0, as in Python. Each hit's score is multiplied by every edismax `boost=` expression (and by the request `boost` when `defType` is not edismax), then each `bf` term is added (`bf` is split on whitespace unless it contains `(`); boosts inside `fq` and `{!parent}` child queries are dropped. With a function or a sort, every hit is scored before the page is cut.
+- **Sorting** (`src/query/sort.rs`): comma-separated keys with `asc`/`desc`, as Python's `apply_sort`: `score`, numeric fields, string fields (code point order; names outside the schema lowercased), enum fields in `enumsConfig.xml` order, `sort_text` (ICU collation) fields by folding, functions such as `def(trending_z_score, 0)`, and `random_<seed>` (by MD5 of the name and the key, `src/md5.rs`). Missing values sort last in both directions; index order breaks ties.
+- **Ignored**: the `[subquery]` and `[child]` `fl` transformers (they do not change `numFound`).
 
-An undefined field, a bare term with no default field, a range on a text field, an unknown `{!type}`, malformed local params, facets, grouping, cursors and other sorts return an empty result with a `warning` in `responseHeader` and a line on stderr. A field the schema defines but no document has matches nothing.
+An undefined field, a bare term with no default field, a range on a text field, an unknown `{!type}`, malformed local params, facets, grouping and cursors return an empty result with a `warning` in `responseHeader` and a line on stderr. A field the schema defines but no document has matches nothing.
 
 ## Analyzers
 
 `text_en_splitting` (whitespace, ICU-style folding, word delimiter with catenation, lowercase, protected words, Porter), `text_international` (standard tokenizer, folding) and `text_general` (standard tokenizer, lowercase). Not done: query-time synonyms; the stop lists are empty in the shipped config. `rust-stemmers` only ships Snowball English (Porter2), which differs from the original Porter that Solr and the Python code use (`odyssey` gives `odyssei`, `one` gives `on`), so `src/porter.rs` is a hand-written Porter (about 220 lines).
 
 ## Measurements (Apple Silicon Mac, host, no Docker, machine under swap pressure)
+
+Function queries and sorts (step 3), the 261 answerable requests, 1,300 queries on fresh servers: RSS 23.3-23.7 MiB, `footprint` 10-14 MiB; over 5,200 more queries RSS 20.4-23.2 MiB, `footprint` 9-13 MiB; p50 1.39-1.51 ms, p95 3.02-3.25 ms. The live malloc heap (`heap`) is 1.98 MB after load and 1.99 MB after 6,500 queries, with the same allocation count after 1,300 and 6,500 queries: the RSS above the 10 MiB at load is freed allocator memory macOS keeps resident, not growth (details in `PORTING.md`). Stripped release binary 4.4 MiB.
 
 Query parser (step 2), the 247 answerable requests, 1,300 queries per run, fresh servers and repeated runs: RSS after 1,300 queries 17.7-22.8 MiB, `footprint` 11-12 MiB; RSS stays flat over 3,900 further queries (no growth); p50 1.33-1.51 ms, p95 2.98-3.27 ms. On the old 155-request subset: RSS 12.6 MiB, `footprint` 11 MiB, p50 1.32-1.39 ms, p95 2.96-3.37 ms. `footprint` (dirty memory) is where step 1 was; the higher RSS on the full set comes from the new query shapes (BOOK_SEARCH with a block join and many `qf`/`pf` fields) and is resident but reusable malloc memory. Stripped release binary 4.5 MiB.
 
@@ -64,8 +70,8 @@ Same 155-request subset (1,300 queries), host to host. macOS compresses and swap
 
 Stripped release binary 4.0 MiB; 125 crates; first release build 95 s with 2 jobs (largest compiler process 837 MiB RSS).
 
-Correctness on the captured Open Library requests (`tools/replay.py`): 247 of 267 are answerable (every request except 14 function or random sorts and 6 facet requests); `numFound` equals real Solr's on all 247 and the top 10 is the same set on 226; top-10 key overlap 639/696 (91.81%). Python minisolr gets 687/696 on the same 247. All 21 misses are BOOK_SEARCH requests with more than 10 hits where the ignored `boost` function decides the order: with Python's function boosts neutralized, the Rust answers equal Python's on all 247 (numFound, top-10 set and top-10 order). Step 1 answered 159 (146 top-10 equal).
+Correctness on the captured Open Library requests (`tools/replay.py`): 261 of 267 are answerable (all but the 6 facet requests); `numFound` equals real Solr's on all 261 and the top 10 is the same set on 252; top-10 key overlap 715/724 (98.76%), the same as Python minisolr. Against Python minisolr (`tools/compare_python.py`) numFound, the top-10 set and the top-10 order are identical on all 261. Feature probes: 49 of 57 answerable, 47 match (the 2 failures need `/update`). Step 2 answered 247 (overlap 91.81%, with boosts ignored), step 1 159.
 
 ## Limits
 
-Single-threaded `tiny_http`, no persistence, no updates, no facets. Unicode categories are approximated with `char` methods and `unicode-normalization`, which cannot tell spacing marks (Mc) from nonspacing marks (Mn); that is the only remaining parity gap (some Telugu text): 2,467 of 2,470 index-time token lists match Python across all 23 text fields in the dev data (99.88%).
+Single-threaded `tiny_http`, no persistence, no updates, no facets, no `cursorMark`. Unicode categories are approximated with `char` methods and `unicode-normalization`, which cannot tell spacing marks (Mc) from nonspacing marks (Mn); that is the only remaining parity gap (some Telugu text): 2,467 of 2,470 index-time token lists match Python across all 23 text fields in the dev data (99.88%).

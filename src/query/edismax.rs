@@ -4,8 +4,8 @@
 //! and with two or more words `pf`, `pf2` and `pf3` add optional phrase clauses that only
 //! change the ranking.
 //!
-//! `boost=` is collected into [`Compiler::boosts`] (the step 3 seam); `bf` is read by the
-//! caller of the search, also for step 3. `ps` (slop of the `pf*` phrases) and `qs` (slop
+//! `boost=` is collected into [`Compiler::boosts`] and `bf` is read by `select`, which
+//! rescore the hits after the search. `ps` (slop of the `pf*` phrases) and `qs` (slop
 //! of quoted phrases without `~n`) default to 0, which is what Python always uses.
 
 use tantivy::query::{BooleanQuery, BoostQuery, EmptyQuery, Occur, Query};
@@ -178,7 +178,6 @@ impl Compiler<'_> {
             phrase_slop: slop(inherited(local, params, "qs")),
         };
         if let Some(boost) = own(local, params, "boost") {
-            // Step 3 seam: the function evaluator multiplies scores by these.
             self.boosts.push(deref(params, boost).to_owned());
         }
         let v = v.trim();
