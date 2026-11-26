@@ -577,6 +577,80 @@ mod tests {
     }
 
     #[test]
+    fn request_boost_outside_edismax_and_fq_boosts_discarded() {
+        let s = store();
+        let works = [("q", "type:work"), ("fl", "key")];
+        let with = |extra: &[(&'static str, &'static str)]| {
+            let mut p = works.to_vec();
+            p.extend_from_slice(extra);
+            keys(&s, &p)
+        };
+        assert_eq!(
+            with(&[("boost", "edition_count")]),
+            ["/works/OL3W", "/works/OL2W", "/works/OL1W"]
+        );
+        assert_eq!(
+            with(&[("boost", "sub(0,edition_count)"), ("rows", "1")]),
+            ["/works/OL1W"]
+        );
+        assert_eq!(
+            with(&[("fq", "{!edismax qf=title boost=sub(0,edition_count)}*:*")]),
+            with(&[]),
+            "a boost inside fq does not score"
+        );
+        assert_eq!(
+            with(&[("bf", "first_publish_year  edition_count")]),
+            ["/works/OL3W", "/works/OL2W", "/works/OL1W"]
+        );
+    }
+
+    #[test]
+    fn multi_key_sorts_and_directions() {
+        let s = store();
+        assert_eq!(
+            keys(
+                &s,
+                &[
+                    ("q", "*:*"),
+                    ("sort", "type asc, edition_count desc"),
+                    ("fl", "key")
+                ]
+            ),
+            [
+                "/authors/OL9A",
+                "/books/OL1M",
+                "/books/OL2M",
+                "/works/OL3W",
+                "/works/OL2W",
+                "/works/OL1W"
+            ]
+        );
+        assert_eq!(
+            keys(
+                &s,
+                &[
+                    ("q", "type:work"),
+                    ("sort", "score asc, key desc"),
+                    ("fl", "key")
+                ]
+            ),
+            ["/works/OL3W", "/works/OL2W", "/works/OL1W"]
+        );
+        assert_eq!(
+            keys(
+                &s,
+                &[
+                    ("q", "type:work"),
+                    ("sort", "ebook_access DESC"),
+                    ("fl", "key")
+                ]
+            ),
+            ["/works/OL3W", "/works/OL1W", "/works/OL2W"],
+            "enum order, any case direction"
+        );
+    }
+
+    #[test]
     fn params_last_value_wins() {
         let p = params(&[("rows", "1"), ("rows", "2"), ("fq", "a"), ("fq", "b")]);
         assert_eq!(p.get("rows"), Some("2"));

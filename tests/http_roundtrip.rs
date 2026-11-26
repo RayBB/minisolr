@@ -177,3 +177,68 @@ fn analyzers_match_recorded_python_output() {
         ["peaceon"]
     );
 }
+
+#[test]
+fn function_boosts_and_sorts() -> TestResult {
+    let schema = Schema::load(Path::new("tests/data/conf"))?;
+    let store = Store::load(schema, Path::new("tests/data/mini.jsonl"))?;
+    let addr = free_addr()?;
+    let bound = addr.clone();
+    thread::spawn(move || serve(&store, &bound));
+    thread::sleep(Duration::from_millis(300));
+    let post = |pairs: &[(&str, &str)]| {
+        request(
+            &addr,
+            "POST /solr/openlibrary/select HTTP/1.1\r\nContent-Type: application/x-www-form-urlencoded",
+            &form(pairs),
+        )
+    };
+    let works = [("q", "*:*"), ("fq", "type:work"), ("fl", "key")];
+    let with = |extra: &[(&str, &str)]| {
+        let mut p = works.to_vec();
+        p.extend_from_slice(extra);
+        post(&p)
+    };
+
+    let boosted = with(&[
+        ("defType", "edismax"),
+        ("qf", "title"),
+        ("boost", "log(edition_count)"),
+        ("rows", "2"),
+    ])?;
+    assert_eq!(boosted["response"]["numFound"], 4);
+    assert_eq!(keys(&boosted), ["/works/OL2W", "/works/OL1W"]);
+
+    let bf = with(&[
+        ("defType", "edismax"),
+        ("qf", "title"),
+        ("bf", "sub(0,edition_count)"),
+        ("rows", "1"),
+    ])?;
+    assert_eq!(
+        keys(&bf),
+        ["/works/OL4W"],
+        "every hit is scored before the page"
+    );
+
+    let by_year = with(&[("sort", "def(first_publish_year,9999) desc, key asc")])?;
+    assert_eq!(
+        keys(&by_year),
+        ["/works/OL4W", "/works/OL3W", "/works/OL2W", "/works/OL1W"]
+    );
+
+    let random = with(&[("sort", "random_1 asc")])?;
+    // Python: sorted by int(md5("random_1" + key).hexdigest()[:8], 16).
+    assert_eq!(
+        keys(&random),
+        ["/works/OL1W", "/works/OL4W", "/works/OL3W", "/works/OL2W"]
+    );
+
+    let enums = post(&[
+        ("q", "type:edition"),
+        ("sort", "ebook_access desc"),
+        ("fl", "key"),
+    ])?;
+    assert_eq!(keys(&enums), ["/books/OL3M", "/books/OL1M", "/books/OL2M"]);
+    Ok(())
+}
