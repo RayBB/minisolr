@@ -7,6 +7,9 @@
 //! `pf`, ranges, wildcards, boolean operators other than `AND`, facets) is rejected with
 //! [`Error::Unsupported`]. Boost and `pf` parameters only change ranking, so they are ignored.
 
+pub mod ast;
+pub mod lexer;
+
 use serde_json::{Map, Value};
 use tantivy::collector::{Count, DocSetCollector, TopDocs};
 use tantivy::query::{
