@@ -51,6 +51,7 @@
       <filter name="porterStem"/>
     </analyzer>
   </fieldType>
+  <fieldType name="ebookAccessLevel" class="solr.EnumFieldType" enumsConfig="enumsConfig.xml" enumName="ebookAccess"/>
   <field name="_root_" type="string" indexed="true" stored="false"/>
   <field name="key" type="string" required="true"/>
   <field name="type" type="string" required="true"/>
@@ -66,6 +67,11 @@
   <field name="edition_count" type="pint"/>
   <field name="first_publish_year" type="pint"/>
   <field name="work_count" type="pint"/>
+  <field name="ebook_access" type="ebookAccessLevel" multiValued="false"/>
+  <field name="language" type="string" multiValued="true"/>
+  <field name="ia" type="string" multiValued="true"/>
+  <field name="cover_i" type="pint"/>
+  <field name="publisher" type="text_general" multiValued="true"/>
   <dynamicField name="*_s" type="string" indexed="true" stored="true"/>
   <dynamicField name="*_i" type="pint" indexed="true" stored="true"/>
   <copyField source="subject" dest="subject_facet"/>

@@ -1,9 +1,16 @@
-//! Local params: `{!type key=value ...}` syntax and `$param` dereference.
+//! Local params: `{!type key=value ...}` syntax, `$param` dereference, and compiling the
+//! parser types `edismax`/`dismax`, `lucene`, `terms`, `field`, `prefix` and `parent`.
 
 use std::borrow::Cow;
 
+use tantivy::Term;
+use tantivy::query::{EmptyQuery, Query, TermSetQuery};
+
 use super::Params;
 use super::ast::{LocalParams, ParseError};
+use super::compile::{Compiler, Ctx, LeafOpts, QueryResult};
+use crate::Error;
+use crate::schema::Kind;
 
 /// Parses local params; `pos` is the byte offset just after `{!`. Returns the params and
 /// the offset after the closing `}`.
@@ -98,6 +105,93 @@ pub fn deref<'a>(params: &'a Params, v: &'a str) -> &'a str {
         Some(name) => params.get(name).unwrap_or_default(),
         None => v,
     }
+}
+
+impl Compiler<'_> {
+    /// Compiles `{!type ...}` in context `ctx`.
+    pub(super) fn local_params(&mut self, local: &LocalParams<'_>, ctx: Ctx<'_>) -> QueryResult {
+        let params = self.params;
+        let v = deref(params, local.get("v").unwrap_or_default());
+        match local.kind {
+            "edismax" | "dismax" => self.edismax(v, Some(local)),
+            "lucene" | "" => self.compile_str(v, ctx.child()),
+            "terms" => self.terms(local, v),
+            "field" => {
+                let field = required(local, "f")?;
+                self.leaf(field, v, ctx, LeafOpts::default())
+            }
+            "prefix" => {
+                let field = required(local, "f")?;
+                self.leaf(field, &format!("{v}*"), ctx, LeafOpts::default())
+            }
+            "parent" => {
+                let filters: Vec<&str> = match local.get("filters") {
+                    Some(f) if f.starts_with('$') => {
+                        params.all(f.get(1..).unwrap_or_default()).collect()
+                    }
+                    Some("") | None => Vec::new(),
+                    Some(f) => vec![f],
+                };
+                self.parent_join(v, &filters)
+            }
+            other => Err(Error::Unsupported(format!(
+                "local params type {{!{other}}}"
+            ))),
+        }
+    }
+
+    /// `{!terms f=field v=a,b,c}` (optional `separator=`): any of the values, constant score.
+    fn terms(&self, local: &LocalParams<'_>, v: &str) -> QueryResult {
+        let name = required(local, "f")?;
+        let separator = local.get("separator").unwrap_or(",");
+        let values: Vec<&str> = if separator.is_empty() {
+            vec![v]
+        } else {
+            v.split(separator).filter(|x| !x.is_empty()).collect()
+        };
+        let Some(def) = self.store.schema.get(name) else {
+            return Ok(Some(Box::new(EmptyQuery)));
+        };
+        let Some(indexed) = self.store.fields.get(name) else {
+            return Ok(Some(Box::new(EmptyQuery)));
+        };
+        if values.is_empty() {
+            return Ok(Some(Box::new(EmptyQuery)));
+        }
+        let field = indexed.handle;
+        let terms: Vec<Term> = match def.kind {
+            Kind::Int | Kind::Float => values
+                .iter()
+                .map(|x| {
+                    x.trim()
+                        .parse::<f64>()
+                        .map(|n| Term::from_field_f64(field, n))
+                        .map_err(|_| {
+                            Error::Unsupported(format!("{{!terms}} value {x:?} on {name}"))
+                        })
+                })
+                .collect::<Result<_, _>>()?,
+            Kind::Text => values
+                .iter()
+                .flat_map(|x| self.store.analyzer.query(def.chain, x))
+                .map(|t| Term::from_field_text(field, &t))
+                .collect(),
+            _ => values
+                .iter()
+                .map(|x| Term::from_field_text(field, x))
+                .collect(),
+        };
+        if terms.is_empty() {
+            return Ok(Some(Box::new(EmptyQuery)));
+        }
+        Ok(Some(Box::new(TermSetQuery::new(terms)) as Box<dyn Query>))
+    }
+}
+
+fn required<'l>(local: &'l LocalParams<'_>, key: &str) -> Result<&'l str, Error> {
+    local
+        .get(key)
+        .ok_or_else(|| Error::Unsupported(format!("{{!{}}} without {key}=", local.kind)))
 }
 
 #[cfg(test)]
