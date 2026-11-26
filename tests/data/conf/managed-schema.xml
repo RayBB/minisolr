@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- A small subset of Open Library's managed-schema.xml for the tests. -->
+<schema name="openlibrary-test" version="1.6">
+  <uniqueKey>key</uniqueKey>
+  <fieldType name="string" class="solr.StrField" sortMissingLast="true"/>
+  <fieldType name="boolean" class="solr.BoolField" sortMissingLast="true"/>
+  <fieldType name="pint" class="solr.IntPointField"/>
+  <fieldType name="text_general" class="solr.TextField" positionIncrementGap="100" multiValued="true">
+    <analyzer type="index">
+      <tokenizer name="standard"/>
+      <filter name="stop" ignoreCase="true" words="stopwords.txt"/>
+      <filter name="lowercase"/>
+    </analyzer>
+    <analyzer type="query">
+      <tokenizer name="standard"/>
+      <filter name="stop" ignoreCase="true" words="stopwords.txt"/>
+      <filter name="synonymGraph" synonyms="synonyms.txt" ignoreCase="true" expand="true"/>
+      <filter name="lowercase"/>
+    </analyzer>
+  </fieldType>
+  <fieldType name="text_international" class="solr.TextField" positionIncrementGap="100" multiValued="true">
+    <analyzer type="index">
+      <tokenizer name="standard"/>
+      <filter name="stop" ignoreCase="true" words="stopwords.txt"/>
+      <filter name="icuFolding"/>
+    </analyzer>
+    <analyzer type="query">
+      <tokenizer name="standard"/>
+      <filter name="stop" ignoreCase="true" words="stopwords.txt"/>
+      <filter name="synonymGraph" synonyms="synonyms.txt" ignoreCase="true" expand="true"/>
+      <filter name="icuFolding"/>
+    </analyzer>
+  </fieldType>
+  <fieldType name="text_en_splitting" class="solr.TextField" positionIncrementGap="100" autoGeneratePhraseQueries="true">
+    <analyzer type="index">
+      <tokenizer name="whitespace"/>
+      <filter name="icuFolding"/>
+      <filter name="wordDelimiterGraph" generateWordParts="1" generateNumberParts="1" catenateWords="1" catenateNumbers="1" catenateAll="0" splitOnCaseChange="1"/>
+      <filter name="lowercase"/>
+      <filter name="keywordMarker" protected="protwords.txt"/>
+      <filter name="porterStem"/>
+      <filter name="flattenGraph"/>
+    </analyzer>
+    <analyzer type="query">
+      <tokenizer name="whitespace"/>
+      <filter name="synonymGraph" synonyms="synonyms.txt" ignoreCase="true" expand="true"/>
+      <filter name="icuFolding"/>
+      <filter name="wordDelimiterGraph" generateWordParts="1" generateNumberParts="1" catenateWords="0" catenateNumbers="0" catenateAll="0" splitOnCaseChange="1"/>
+      <filter name="lowercase"/>
+      <filter name="keywordMarker" protected="protwords.txt"/>
+      <filter name="porterStem"/>
+    </analyzer>
+  </fieldType>
+  <field name="_root_" type="string" indexed="true" stored="false"/>
+  <field name="key" type="string" required="true"/>
+  <field name="type" type="string" required="true"/>
+  <field name="title" type="text_en_splitting"/>
+  <field name="alternative_title" type="text_en_splitting" stored="false" multiValued="true"/>
+  <field name="subject" type="text_en_splitting" multiValued="true"/>
+  <field name="subject_facet" type="string" indexed="false" stored="false" multiValued="true"/>
+  <field name="author_name" type="text_international" multiValued="true"/>
+  <field name="author_key" type="string" multiValued="true"/>
+  <field name="name" type="text_international" multiValued="false"/>
+  <field name="alternate_names" type="text_international" multiValued="true"/>
+  <field name="has_fulltext" type="boolean"/>
+  <field name="edition_count" type="pint"/>
+  <field name="first_publish_year" type="pint"/>
+  <field name="work_count" type="pint"/>
+  <dynamicField name="*_s" type="string" indexed="true" stored="true"/>
+  <dynamicField name="*_i" type="pint" indexed="true" stored="true"/>
+  <copyField source="subject" dest="subject_facet"/>
+</schema>

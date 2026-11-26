@@ -6,11 +6,12 @@ use std::process::ExitCode;
 
 use minisolr_rs::Error;
 use minisolr_rs::analysis::Analyzer;
+use minisolr_rs::schema::{Kind, Schema};
 use minisolr_rs::server::serve;
-use minisolr_rs::store::{FieldDef, Kind, Store, field_def};
+use minisolr_rs::store::Store;
 use serde_json::Value;
 
-const USAGE: &str = "usage:\n  minisolr-rs serve <docs.jsonl> [addr=127.0.0.1:8983]\n  minisolr-rs parity <tokens.jsonl>";
+const USAGE: &str = "usage:\n  minisolr-rs serve <conf-dir> <docs.jsonl> [addr=127.0.0.1:8983]\n  minisolr-rs parity <conf-dir> <tokens.jsonl>\n\n<conf-dir> holds managed-schema.xml and enumsConfig.xml.";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -20,9 +21,9 @@ fn main() -> ExitCode {
         .collect::<Vec<_>>()
         .as_slice()
     {
-        ["serve", docs] => run_serve(docs, "127.0.0.1:8983"),
-        ["serve", docs, addr] => run_serve(docs, addr),
-        ["parity", tokens] => parity(Path::new(tokens)),
+        ["serve", conf, docs] => run_serve(conf, docs, "127.0.0.1:8983"),
+        ["serve", conf, docs, addr] => run_serve(conf, docs, addr),
+        ["parity", conf, tokens] => parity(conf, Path::new(tokens)),
         _ => Err(Error::Other(USAGE.into())),
     };
     match result {
@@ -34,29 +35,31 @@ fn main() -> ExitCode {
     }
 }
 
-fn run_serve(docs: &str, addr: &str) -> Result<(), Error> {
-    serve(&Store::load(Path::new(docs))?, addr)
+fn run_serve(conf: &str, docs: &str, addr: &str) -> Result<(), Error> {
+    let schema = Schema::load(Path::new(conf))?;
+    serve(&Store::load(schema, Path::new(docs))?, addr)
 }
 
 /// Compares Rust index-time tokens with Python's, dumped as JSON lines of
 /// `{"field", "value", "main", "extra"}`; prints per-field match rates and mismatches.
-fn parity(path: &Path) -> Result<(), Error> {
+/// Each field's chain comes from the schema; rows for non-text fields are skipped.
+fn parity(conf: &str, path: &Path) -> Result<(), Error> {
+    let schema = Schema::load(Path::new(conf))?;
     let analyzer = Analyzer::new();
     let mut stats: Vec<(String, usize, usize)> = Vec::new();
     let mut shown = 0;
     for line in BufReader::new(std::fs::File::open(path)?).lines() {
         let row: Value = serde_json::from_str(&line?)?;
         let name = row.get("field").and_then(Value::as_str).unwrap_or_default();
-        let (
-            Some(FieldDef {
-                kind: Kind::Text(chain),
-                ..
-            }),
-            Some(value),
-        ) = (field_def(name), row.get("value").and_then(Value::as_str))
+        let (Some(field), Some(value)) =
+            (schema.get(name), row.get("value").and_then(Value::as_str))
         else {
             continue;
         };
+        if field.kind != Kind::Text {
+            continue;
+        }
+        let chain = field.chain;
         let strings = |key: &str| -> Vec<String> {
             row.get(key)
                 .and_then(Value::as_array)
@@ -67,7 +70,7 @@ fn parity(path: &Path) -> Result<(), Error> {
                 })
         };
         let want = (strings("main"), strings("extra"));
-        let got = analyzer.index(*chain, value);
+        let got = analyzer.index(chain, value);
         let ok = (got.main.clone(), got.extra.clone()) == want;
         match stats.iter_mut().find(|(n, ..)| n == name) {
             Some(entry) => {

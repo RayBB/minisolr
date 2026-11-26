@@ -1,123 +1,44 @@
-//! The hard-coded field table, the document store and the RAM Tantivy index.
+//! The document store and the RAM Tantivy index built from the parsed schema.
 //!
 //! Text fields are analyzed here and indexed as space-joined tokens on Tantivy's
-//! `whitespace` tokenizer, strings on `raw`, numbers as `f64`. A fast `ord` field maps a
-//! hit back to the document held in memory. The table is a small subset of
-//! `managed-schema.xml`; it is not parsed from the XML.
+//! `whitespace` tokenizer; strings, enums, dates and booleans on `raw`; numbers as `f64`.
+//! Like Python's `Store._rebuild`, every static field that is searchable is in the index,
+//! plus each dynamic field name that occurs in a document. copyField values are applied
+//! at index time (and again when a document is returned); the stored documents stay as
+//! loaded. Nested children are separate rows sharing `_root_`. A fast `ord` field maps a
+//! hit back to the document held in memory.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
-use serde_json::Value;
-use tantivy::schema::{
-    Field, IndexRecordOption, NumericOptions, Schema, TextFieldIndexing, TextOptions,
-};
+use serde_json::{Map, Value};
+use tantivy::schema::{Field, IndexRecordOption, NumericOptions, TextFieldIndexing, TextOptions};
 use tantivy::{Index, IndexReader, ReloadPolicy, TantivyDocument};
 
 use crate::Error;
-use crate::analysis::{Analyzer, Chain};
+use crate::analysis::Analyzer;
+use crate::schema::{self, Kind, Schema};
 
-/// How a field is indexed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Kind {
-    /// Analyzed text.
-    Text(Chain),
-    /// Exact-match string.
-    Str,
-    /// JSON boolean, indexed as the strings `true` and `false`.
-    Bool,
-    /// Number, indexed as `f64`.
-    Num,
-}
-
-/// One entry of the field table.
-#[derive(Debug, PartialEq)]
-pub struct FieldDef {
-    /// Solr field name.
-    pub name: &'static str,
-    /// Indexing kind.
-    pub kind: Kind,
-    /// Document key to read values from when it differs from `name` (a `copyField`).
-    pub source: Option<&'static str>,
-}
-
-const fn def(name: &'static str, kind: Kind) -> FieldDef {
-    FieldDef {
-        name,
-        kind,
-        source: None,
-    }
-}
-
-const fn copy(name: &'static str, source: &'static str, kind: Kind) -> FieldDef {
-    FieldDef {
-        name,
-        kind,
-        source: Some(source),
-    }
-}
-
-const EN: Kind = Kind::Text(Chain::EnSplitting);
-const INTL: Kind = Kind::Text(Chain::International);
-const GENERAL: Kind = Kind::Text(Chain::General);
-
-/// The fields this prototype can search. Hard-coded.
-pub const FIELDS: &[FieldDef] = &[
-    def("title", EN),
-    def("alternative_title", EN),
-    def("subject", EN),
-    def("publisher", EN),
-    def("series_name", EN),
-    def("chapter", EN),
-    def("time", EN),
-    def("oclc", EN),
-    def("author_name", INTL),
-    def("author_alternative_name", INTL),
-    def("name", INTL),
-    def("alternate_names", INTL),
-    def("place", GENERAL),
-    def("person", GENERAL),
-    def("contributor", GENERAL),
-    def("lccn", GENERAL),
-    def("key", Kind::Str),
-    def("type", Kind::Str),
-    def("author_key", Kind::Str),
-    def("edition_key", Kind::Str),
-    def("ia", Kind::Str),
-    def("isbn", Kind::Str),
-    def("language", Kind::Str),
-    def("ebook_access", Kind::Str),
-    def("series_key", Kind::Str),
-    def("series_position", Kind::Str),
-    def("subject_key", Kind::Str),
-    def("place_key", Kind::Str),
-    def("person_key", Kind::Str),
-    def("time_key", Kind::Str),
-    copy("subject_facet", "subject", Kind::Str),
-    copy("publisher_facet", "publisher", Kind::Str),
-    def("has_fulltext", Kind::Bool),
-    def("public_scan_b", Kind::Bool),
-    def("edition_count", Kind::Num),
-    def("first_publish_year", Kind::Num),
-    def("readinglog_count", Kind::Num),
-    def("work_count", Kind::Num),
-];
-
-/// Looks a field up by name.
-#[must_use]
-pub fn field_def(name: &str) -> Option<&'static FieldDef> {
-    FIELDS.iter().find(|f| f.name == name)
+/// A schema field that is in the Tantivy index.
+#[derive(Debug)]
+pub struct Indexed {
+    /// The schema definition (concrete name for dynamic fields).
+    pub def: schema::Field,
+    /// The Tantivy field handle.
+    pub handle: Field,
 }
 
 /// The documents and their index.
 pub struct Store {
+    /// The schema the index was built from.
+    pub schema: Schema,
     /// The analyzer shared by indexing and querying.
     pub analyzer: Analyzer,
     /// Documents in `ord` order, as loaded.
     pub docs: Vec<Value>,
     pub(crate) reader: IndexReader,
-    pub(crate) fields: HashMap<&'static str, Field>,
+    pub(crate) fields: HashMap<String, Indexed>,
 }
 
 impl Store {
@@ -125,7 +46,7 @@ impl Store {
     ///
     /// # Errors
     /// Fails if the file cannot be read or parsed, or if Tantivy fails.
-    pub fn load(path: &Path) -> Result<Self, Error> {
+    pub fn load(schema: Schema, path: &Path) -> Result<Self, Error> {
         let mut docs = Vec::new();
         for line in BufReader::new(std::fs::File::open(path)?).lines() {
             let line = line?;
@@ -133,37 +54,62 @@ impl Store {
                 docs.push(serde_json::from_str::<Value>(&line)?);
             }
         }
-        Self::from_docs(docs)
+        Self::from_docs(schema, docs)
     }
 
     /// Indexes already parsed documents in RAM.
     ///
     /// # Errors
     /// Fails if Tantivy fails.
-    pub fn from_docs(docs: Vec<Value>) -> Result<Self, Error> {
-        let mut builder = Schema::builder();
+    pub fn from_docs(schema: Schema, docs: Vec<Value>) -> Result<Self, Error> {
+        let empty = Map::new();
+        let as_map = |d| object(d, &empty);
+        let mut defs: HashMap<String, schema::Field> = schema
+            .fields
+            .values()
+            .filter(|f| f.in_index())
+            .map(|f| (f.name.clone(), f.clone()))
+            .collect();
+        for doc in &docs {
+            for name in schema.effective(as_map(doc)).keys() {
+                if !defs.contains_key(name)
+                    && !schema.fields.contains_key(name)
+                    && let Some(f) = schema.get(name).filter(|f| f.in_index())
+                {
+                    defs.insert(name.clone(), f.into_owned());
+                }
+            }
+        }
+        warn_fallback_chains(&schema, defs.values());
+
+        let mut builder = tantivy::schema::Schema::builder();
         let ord = builder.add_u64_field("ord", NumericOptions::default().set_fast());
-        let mut fields = HashMap::new();
-        for f in FIELDS {
-            let field = match f.kind {
-                Kind::Text(_) => builder.add_text_field(
-                    f.name,
+        let mut names: Vec<String> = defs.keys().cloned().collect();
+        names.sort_unstable();
+        let mut fields = HashMap::with_capacity(names.len());
+        for name in names {
+            let Some(def) = defs.remove(&name) else {
+                continue;
+            };
+            let handle = match def.kind {
+                Kind::Text => builder.add_text_field(
+                    &name,
                     text_options("whitespace", IndexRecordOption::WithFreqsAndPositions),
                 ),
-                Kind::Str | Kind::Bool => {
-                    builder.add_text_field(f.name, text_options("raw", IndexRecordOption::Basic))
+                Kind::Int | Kind::Float => {
+                    builder.add_f64_field(&name, NumericOptions::default().set_indexed().set_fast())
                 }
-                Kind::Num => builder
-                    .add_f64_field(f.name, NumericOptions::default().set_indexed().set_fast()),
+                _ => builder.add_text_field(&name, text_options("raw", IndexRecordOption::Basic)),
             };
-            fields.insert(f.name, field);
+            fields.insert(name, Indexed { def, handle });
         }
         let index = Index::create_in_ram(builder.build());
         let analyzer = Analyzer::new();
         {
             let mut writer = index.writer_with_num_threads::<TantivyDocument>(1, 15_000_000)?;
             for (i, doc) in docs.iter().enumerate() {
-                writer.add_document(to_tantivy(doc, i as u64, ord, &fields, analyzer))?;
+                let row = schema.effective(as_map(doc));
+                writer.add_document(to_tantivy(&row, i as u64, ord, &fields, analyzer))?;
             }
             writer.commit()?;
         }
@@ -172,6 +118,7 @@ impl Store {
             .reload_policy(ReloadPolicy::Manual)
             .try_into()?;
         Ok(Self {
+            schema,
             analyzer,
             docs,
             reader,
@@ -179,9 +126,53 @@ impl Store {
         })
     }
 
-    /// Tantivy handle for a field in the table.
-    pub(crate) fn field(&self, name: &str) -> Option<Field> {
-        self.fields.get(name).copied()
+    /// The indexed field for a query on `name`.
+    ///
+    /// `Ok(None)` means the schema knows the field but no document has it, so nothing
+    /// matches.
+    ///
+    /// # Errors
+    /// [`Error::Unsupported`] for a name the schema does not define or cannot search.
+    pub fn resolve(&self, name: &str) -> Result<Option<&Indexed>, Error> {
+        if let Some(f) = self.fields.get(name) {
+            return Ok(Some(f));
+        }
+        match self.schema.get(name) {
+            None => Err(Error::Unsupported(format!("undefined field {name}"))),
+            Some(f) if !f.searchable() => Err(Error::Unsupported(format!(
+                "field {name} is neither indexed nor docValues"
+            ))),
+            Some(f) if !f.in_index() => Err(Error::Unsupported(format!(
+                "query on {:?} field {name}",
+                f.kind
+            ))),
+            Some(_) => Ok(None),
+        }
+    }
+
+    /// Names of the fields in the Tantivy index.
+    pub fn indexed_names(&self) -> impl Iterator<Item = &str> {
+        self.fields.keys().map(String::as_str)
+    }
+}
+
+fn object<'a>(doc: &'a Value, empty: &'a Map<String, Value>) -> &'a Map<String, Value> {
+    doc.as_object().unwrap_or(empty)
+}
+
+fn warn_fallback_chains<'a>(schema: &Schema, defs: impl Iterator<Item = &'a schema::Field>) {
+    let mut warned = HashSet::new();
+    for def in defs {
+        if def.kind == Kind::Text
+            && let Some(t) = schema.field_type(def)
+            && !t.chain_implemented
+            && warned.insert(t.name.clone())
+        {
+            eprintln!(
+                "warning: field type {} has no implemented analyzer; using whitespace + lowercase (first field: {})",
+                t.name, def.name
+            );
+        }
     }
 }
 
@@ -193,7 +184,8 @@ fn text_options(tokenizer: &str, option: IndexRecordOption) -> TextOptions {
     )
 }
 
-fn values(v: &Value) -> impl Iterator<Item = &Value> {
+/// The values of a field: the items of an array, or the value itself.
+pub(crate) fn values(v: &Value) -> impl Iterator<Item = &Value> {
     match v {
         Value::Array(items) => items.iter(),
         other => std::slice::from_ref(other).iter(),
@@ -201,24 +193,24 @@ fn values(v: &Value) -> impl Iterator<Item = &Value> {
 }
 
 fn to_tantivy(
-    doc: &Value,
+    row: &Map<String, Value>,
     ord_value: u64,
     ord: Field,
-    fields: &HashMap<&'static str, Field>,
+    fields: &HashMap<String, Indexed>,
     analyzer: Analyzer,
 ) -> TantivyDocument {
     let mut out = TantivyDocument::default();
     out.add_u64(ord, ord_value);
-    for f in FIELDS {
-        let (Some(&field), Some(raw)) = (fields.get(f.name), doc.get(f.source.unwrap_or(f.name)))
-        else {
+    for (name, raw) in row {
+        let Some(Indexed { def, handle }) = fields.get(name) else {
             continue;
         };
+        let field = *handle;
         for v in values(raw) {
-            match (f.kind, v) {
+            match (def.kind, v) {
                 (_, Value::Null) => {}
-                (Kind::Text(chain), _) => {
-                    let analysis = analyzer.index(chain, &as_text(v));
+                (Kind::Text, _) => {
+                    let analysis = analyzer.index(def.chain, &as_text(v));
                     if !analysis.main.is_empty() {
                         out.add_text(field, analysis.main.join(" "));
                     }
@@ -226,16 +218,14 @@ fn to_tantivy(
                         out.add_text(field, analysis.extra.join(" "));
                     }
                 }
-                (Kind::Str, _) => out.add_text(field, as_text(v)),
-                (Kind::Bool, Value::Bool(b)) => {
-                    out.add_text(field, if *b { "true" } else { "false" });
-                }
-                (Kind::Num, Value::Number(n)) => {
+                (Kind::Int | Kind::Float, Value::Number(n)) => {
                     if let Some(x) = n.as_f64() {
                         out.add_f64(field, x);
                     }
                 }
-                _ => {}
+                (Kind::Int | Kind::Float, _) => {}
+                (_, Value::Bool(b)) => out.add_text(field, if *b { "true" } else { "false" }),
+                _ => out.add_text(field, as_text(v)),
             }
         }
     }
@@ -254,22 +244,42 @@ pub(crate) fn as_text(v: &Value) -> std::borrow::Cow<'_, str> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn field_table_has_unique_names() {
-        let mut names: Vec<_> = FIELDS.iter().map(|f| f.name).collect();
-        names.sort_unstable();
-        names.dedup();
-        assert_eq!(names.len(), FIELDS.len());
-        assert!(field_def("title").is_some());
-        assert!(field_def("nope").is_none());
-    }
+    const XML: &str = r#"<schema>
+  <fieldType name="string" class="solr.StrField"/>
+  <fieldType name="pint" class="solr.IntPointField"/>
+  <fieldType name="text_general" class="solr.TextField">
+    <analyzer><tokenizer name="standard"/><filter name="lowercase"/></analyzer>
+  </fieldType>
+  <field name="key" type="string"/>
+  <field name="title" type="text_general"/>
+  <field name="title_suggest" type="text_general"/>
+  <field name="edition_count" type="pint"/>
+  <dynamicField name="*_s" type="string"/>
+  <dynamicField name="*_i" type="pint"/>
+  <copyField source="title" dest="title_suggest"/>
+</schema>"#;
 
     #[test]
-    fn builds_an_index_from_documents() {
+    fn indexes_static_and_seen_dynamic_fields() {
+        let schema = Schema::parse(XML, None).expect("schema");
         let docs = vec![
-            serde_json::json!({"key": "/works/OL1W", "type": "work", "title": "Alice in Wonderland", "edition_count": 3}),
+            serde_json::json!({"key": "/works/OL1W", "title": "Alice in Wonderland", "edition_count": 3, "lending_s": "x"}),
         ];
-        let store = Store::from_docs(docs).expect("index builds");
+        let store = Store::from_docs(schema, docs).expect("index builds");
         assert_eq!(store.reader.searcher().num_docs(), 1);
+        let mut names: Vec<&str> = store.indexed_names().collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            [
+                "edition_count",
+                "key",
+                "lending_s",
+                "title",
+                "title_suggest"
+            ]
+        );
+        assert!(store.resolve("count_i").expect("known dynamic").is_none());
+        assert!(matches!(store.resolve("nope"), Err(Error::Unsupported(_))));
     }
 }

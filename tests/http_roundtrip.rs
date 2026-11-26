@@ -7,6 +7,7 @@ use std::thread;
 use std::time::Duration;
 
 use minisolr_rs::analysis::{Analyzer, Chain};
+use minisolr_rs::schema::Schema;
 use minisolr_rs::server::serve;
 use minisolr_rs::store::Store;
 use serde_json::Value;
@@ -33,7 +34,8 @@ fn request(addr: &str, head: &str, body: &str) -> TestResult<Value> {
 
 #[test]
 fn serves_select_ping_and_post_forms() -> TestResult {
-    let store = Store::load(Path::new("tests/data/mini.jsonl"))?;
+    let schema = Schema::load(Path::new("tests/data/conf"))?;
+    let store = Store::load(schema, Path::new("tests/data/mini.jsonl"))?;
     let addr = free_addr()?;
     let bound = addr.clone();
     thread::spawn(move || serve(&store, &bound));

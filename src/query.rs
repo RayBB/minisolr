@@ -10,13 +10,15 @@
 use serde_json::{Map, Value};
 use tantivy::collector::{Count, DocSetCollector, TopDocs};
 use tantivy::query::{
-    AllQuery, BooleanQuery, BoostQuery, ConstScoreQuery, Occur, PhraseQuery, Query, TermQuery,
+    AllQuery, BooleanQuery, BoostQuery, ConstScoreQuery, EmptyQuery, Occur, PhraseQuery, Query,
+    TermQuery,
 };
 use tantivy::schema::IndexRecordOption;
 use tantivy::{DocAddress, Searcher, Term};
 
 use crate::Error;
-use crate::store::{FieldDef, Kind, Store, field_def};
+use crate::schema::{Kind, glob_match};
+use crate::store::{Indexed, Store};
 
 /// Request parameters; a name can repeat.
 #[derive(Debug, Default, Clone)]
@@ -72,7 +74,7 @@ pub struct Selection {
 /// One clause of the user query.
 #[derive(Debug, PartialEq)]
 struct Clause {
-    field: Option<&'static FieldDef>,
+    field: Option<String>,
     text: String,
     phrase: bool,
 }
@@ -96,7 +98,7 @@ pub fn select(store: &Store, params: &Params) -> Result<Selection, Error> {
     }
     let query = build_query(store, params)?;
     let searcher = store.reader.searcher();
-    let (num_found, ords) = match parse_sort(params.get("sort"))? {
+    let (num_found, ords) = match parse_sort(store, params.get("sort"))? {
         None => {
             let (count, top) = if rows == 0 {
                 (searcher.search(&query, &Count)?, Vec::new())
@@ -125,7 +127,7 @@ pub fn select(store: &Store, params: &Params) -> Result<Selection, Error> {
                 store
                     .docs
                     .get(*ord)
-                    .and_then(|d| first_number(d.get(field)))
+                    .and_then(|d| first_number(d.get(field.as_str())))
             };
             ords.sort_by(|a, b| {
                 let ord = key(a)
@@ -141,7 +143,7 @@ pub fn select(store: &Store, params: &Params) -> Result<Selection, Error> {
     let docs = ords
         .into_iter()
         .filter_map(|o| store.docs.get(o))
-        .map(|d| project(d, fl.as_deref()))
+        .map(|d| project(store, d, &fl))
         .collect();
     Ok(Selection {
         num_found,
@@ -177,7 +179,7 @@ fn ord_of(searcher: &Searcher, addr: DocAddress) -> Result<usize, Error> {
 }
 
 /// `sort=<numeric field> asc|desc`, or `None` for score order.
-fn parse_sort(sort: Option<&str>) -> Result<Option<(&'static str, bool)>, Error> {
+fn parse_sort(store: &Store, sort: Option<&str>) -> Result<Option<(String, bool)>, Error> {
     let Some(sort) = sort.map(str::trim).filter(|s| !s.is_empty()) else {
         return Ok(None);
     };
@@ -197,27 +199,61 @@ fn parse_sort(sort: Option<&str>) -> Result<Option<(&'static str, bool)>, Error>
             unsupported("sort score asc")
         };
     }
-    match field_def(name) {
-        Some(f) if f.kind == Kind::Num => Ok(Some((f.name, descending))),
+    match store.schema.get(name) {
+        Some(f) if f.kind.is_numeric() => Ok(Some((f.name.clone(), descending))),
         _ => unsupported(format!("sort {sort}")),
     }
 }
 
-fn field_list(fl: Option<&str>) -> Option<Vec<&str>> {
-    let names: Vec<&str> = fl?.split([',', ' ']).filter(|s| !s.is_empty()).collect();
-    (!names.is_empty() && !names.contains(&"*")).then_some(names)
+/// The parsed `fl`: whether `*` was asked for (or `fl` was empty) and the name patterns.
+struct FieldList<'a> {
+    star: bool,
+    patterns: Vec<&'a str>,
 }
 
-fn project(doc: &Value, fl: Option<&[&str]>) -> Value {
-    match (doc, fl) {
-        (Value::Object(map), Some(names)) => Value::Object(
-            names
-                .iter()
-                .filter_map(|n| map.get(*n).map(|v| ((*n).to_owned(), v.clone())))
-                .collect(),
-        ),
-        _ => doc.clone(),
+fn field_list(fl: Option<&str>) -> FieldList<'_> {
+    let items: Vec<&str> = fl
+        .unwrap_or_default()
+        .split([',', ' '])
+        .filter(|s| !s.is_empty())
+        .collect();
+    FieldList {
+        star: items.is_empty() || items.contains(&"*"),
+        patterns: items
+            .into_iter()
+            .filter(|p| *p != "*" && !p.contains(':') && !p.starts_with('['))
+            .collect(),
     }
+}
+
+/// A returned document, as Python's `project`: the copyField-expanded row, minus block
+/// join internals and names outside the schema; a field is kept when an `fl` pattern
+/// names it or when `fl` has `*` and the field is returned in `*`. Single values of
+/// multiValued fields become one-element arrays.
+fn project(store: &Store, doc: &Value, fl: &FieldList<'_>) -> Value {
+    let Value::Object(map) = doc else {
+        return doc.clone();
+    };
+    let row = store.schema.effective(map);
+    let mut out = Map::new();
+    for (name, value) in row.iter() {
+        if matches!(name.as_str(), "_root_" | "_nest_path_") {
+            continue;
+        }
+        let Some(f) = store.schema.get(name) else {
+            continue;
+        };
+        let explicit = fl.patterns.iter().any(|p| glob_match(p, name));
+        if explicit || (fl.star && f.returned_in_star()) {
+            let value = match value {
+                Value::Array(_) => value.clone(),
+                single if f.multi => Value::Array(vec![single.clone()]),
+                single => single.clone(),
+            };
+            out.insert(name.clone(), value);
+        }
+    }
+    Value::Object(out)
 }
 
 /// What `q` asks for after resolving a `{!edismax ...}` wrapper.
@@ -343,7 +379,7 @@ fn parse_local_params(mut s: &str) -> Result<LocalParams<'_>, Error> {
     }
 }
 
-fn parse_qf(qf: &str) -> Result<Vec<(&'static FieldDef, f32)>, Error> {
+fn parse_qf(qf: &str) -> Result<Vec<(&str, f32)>, Error> {
     qf.split_whitespace()
         .map(|item| {
             let (name, boost) = match item.split_once('^') {
@@ -354,9 +390,7 @@ fn parse_qf(qf: &str) -> Result<Vec<(&'static FieldDef, f32)>, Error> {
                 ),
                 None => (item, 1.0),
             };
-            field_def(name)
-                .map(|f| (f, boost))
-                .ok_or_else(|| Error::Unsupported(format!("qf field {name}")))
+            Ok((name, boost))
         })
         .collect()
 }
@@ -410,10 +444,7 @@ fn next_word(s: &str) -> Result<(&str, &str), Error> {
 
 fn parse_clause(word: &str) -> Result<Clause, Error> {
     let (field, value) = match word.split_once(':') {
-        Some((name, value)) if !name.contains('"') => (
-            Some(field_def(name).ok_or_else(|| Error::Unsupported(format!("field {name}")))?),
-            value,
-        ),
+        Some((name, value)) if !name.contains('"') => (Some(name.to_owned()), value),
         _ => (None, word),
     };
     let (text, phrase) = match value.strip_prefix('"').and_then(|v| v.strip_suffix('"')) {
@@ -439,13 +470,18 @@ fn parse_clause(word: &str) -> Result<Clause, Error> {
 fn clause_query(
     store: &Store,
     clause: &Clause,
-    qf: &[(&'static FieldDef, f32)],
+    qf: &[(&str, f32)],
 ) -> Result<Option<Box<dyn Query>>, Error> {
-    let own = clause.field.map(|f| [(f, 1.0)]);
+    let own = clause.field.as_deref().map(|f| [(f, 1.0)]);
     let targets = own.as_ref().map_or(qf, |t| t.as_slice());
     let mut should: Vec<(Occur, Box<dyn Query>)> = Vec::new();
-    for &(def, boost) in targets {
-        let Some(q) = field_query(store, def, clause)? else {
+    let mut any_indexed = false;
+    for &(name, boost) in targets {
+        let Some(indexed) = store.resolve(name)? else {
+            continue;
+        };
+        any_indexed = true;
+        let Some(q) = field_query(store, indexed, clause)? else {
             continue;
         };
         let q: Box<dyn Query> = if (boost - 1.0).abs() > f32::EPSILON {
@@ -456,6 +492,9 @@ fn clause_query(
         should.push((Occur::Should, q));
     }
     Ok(match should.len() {
+        // Fields the schema defines but no document has: the clause matches nothing.
+        0 if !any_indexed => Some(Box::new(EmptyQuery)),
+        // Analysis left no tokens (punctuation only): the clause is dropped, as in Solr.
         0 => None,
         1 => should.pop().map(|(_, q)| q),
         _ => Some(Box::new(BooleanQuery::new(should))),
@@ -464,18 +503,19 @@ fn clause_query(
 
 fn field_query(
     store: &Store,
-    def: &FieldDef,
+    indexed: &Indexed,
     clause: &Clause,
 ) -> Result<Option<Box<dyn Query>>, Error> {
-    let Some(field) = store.field(def.name) else {
-        return Ok(None);
-    };
+    let Indexed { def, handle } = indexed;
+    let field = *handle;
     let term = |text: &str| Term::from_field_text(field, text);
+    let exact =
+        |t: Term| Some(Box::new(TermQuery::new(t, IndexRecordOption::Basic)) as Box<dyn Query>);
     Ok(match def.kind {
-        Kind::Text(chain) => {
+        Kind::Text => {
             let mut terms: Vec<Term> = store
                 .analyzer
-                .query(chain, &clause.text)
+                .query(def.chain, &clause.text)
                 .iter()
                 .map(|t| term(t))
                 .collect();
@@ -487,15 +527,15 @@ fn field_query(
                 _ => Some(Box::new(PhraseQuery::new(terms))),
             }
         }
-        Kind::Str => Some(Box::new(TermQuery::new(
-            term(&clause.text),
-            IndexRecordOption::Basic,
-        ))),
-        Kind::Bool => Some(Box::new(TermQuery::new(
-            term(&clause.text.to_lowercase()),
-            IndexRecordOption::Basic,
-        ))),
-        Kind::Num => return unsupported(format!("query on numeric field {}", def.name)),
+        Kind::Bool => exact(term(&clause.text.to_lowercase())),
+        Kind::Int | Kind::Float => match clause.text.parse::<f64>() {
+            Ok(x) => exact(Term::from_field_f64(field, x)),
+            Err(_) => return unsupported(format!("non-numeric value for {}", def.name)),
+        },
+        Kind::Str | Kind::Enum | Kind::Date => exact(term(&clause.text)),
+        Kind::SortText | Kind::Skip => {
+            return unsupported(format!("query on {:?} field {}", def.kind, def.name));
+        }
     })
 }
 
@@ -514,10 +554,12 @@ mod tests {
     }
 
     fn store() -> Store {
-        Store::from_docs(vec![
+        let conf = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/conf");
+        let schema = crate::schema::Schema::load(&conf).expect("test schema");
+        Store::from_docs(schema, vec![
             json!({"key": "/works/OL1W", "type": "work", "title": "Alice in Wonderland", "author_name": ["Lewis Carroll"], "edition_count": 5}),
             json!({"key": "/works/OL2W", "type": "work", "title": "Through the Looking-Glass", "author_name": ["Lewis Carroll"], "edition_count": 9}),
-            json!({"key": "/authors/OL9A", "type": "author", "name": "Lewis Carroll"}),
+            json!({"key": "/authors/OL9A", "type": "author", "name": "Lewis Carroll", "rank_i": 4, "subject": "Logic"}),
         ])
         .expect("index builds")
     }
@@ -562,6 +604,34 @@ mod tests {
         let sel = select(&store(), &p).expect("select");
         assert_eq!(sel.docs, vec![json!({"key": "/works/OL2W"})]);
         assert_eq!(sel.num_found, 2);
+    }
+
+    #[test]
+    fn dynamic_fields_numeric_terms_and_fl() {
+        let p = params(&[("q", "rank_i:4"), ("fl", "*")]);
+        let sel = select(&store(), &p).expect("select");
+        assert_eq!(sel.num_found, 1);
+        let doc = sel.docs.first().expect("one doc");
+        assert_eq!(
+            doc.get("subject"),
+            Some(&json!(["Logic"])),
+            "multiValued is wrapped"
+        );
+        assert_eq!(
+            doc.get("subject_facet"),
+            Some(&json!(["Logic"])),
+            "copyField dest is docValues"
+        );
+        let globbed =
+            select(&store(), &params(&[("q", "rank_i:4"), ("fl", "key,*_i")])).expect("select");
+        assert_eq!(
+            globbed.docs,
+            vec![json!({"key": "/authors/OL9A", "rank_i": 4})]
+        );
+        let none = select(&store(), &params(&[("q", "other_s:x")])).expect("known but absent");
+        assert_eq!(none.num_found, 0);
+        let undefined = select(&store(), &params(&[("q", "nope:x")])).expect_err("undefined");
+        assert!(matches!(undefined, Error::Unsupported(_)));
     }
 
     #[test]
