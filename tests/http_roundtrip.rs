@@ -249,6 +249,8 @@ fn function_boosts_and_sorts() -> TestResult {
 }
 
 #[test]
+// One ordered scenario on one server; its steps depend on each other.
+#[allow(clippy::too_many_lines)]
 fn update_lifecycle_and_restart_from_the_data_directory() -> TestResult {
     let dir = std::env::temp_dir().join(format!("minisolr-rs-http-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
