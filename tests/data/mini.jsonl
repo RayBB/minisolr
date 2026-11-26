@@ -3,3 +3,6 @@
 {"key": "/works/OL3W", "type": "work", "title": "Through the Looking-Glass", "alternative_title": ["Through the Looking-Glass"], "author_name": ["Lewis Carroll"], "author_key": ["OL2A"], "has_fulltext": false, "edition_count": 9, "first_publish_year": 1871}
 {"key": "/authors/OL2A", "type": "author", "name": "Lewis Carroll", "alternate_names": ["Charles Lutwidge Dodgson"], "work_count": 2}
 {"key": "/works/OL4W", "type": "work", "title": "Gabriel García Márquez: Cien años de soledad", "alternative_title": ["Cien años de soledad"], "author_name": ["Gabriel García Márquez"], "author_key": ["OL4A"], "edition_count": 3, "first_publish_year": 1967}
+{"key": "/books/OL1M", "_root_": "/works/OL2W", "type": "edition", "title": "Alice", "language": ["eng"], "publisher": ["Macmillan"], "ebook_access": "borrowable"}
+{"key": "/books/OL2M", "_root_": "/works/OL3W", "type": "edition", "title": "Through the Looking-Glass", "language": ["eng"], "ebook_access": "no_ebook"}
+{"key": "/books/OL3M", "_root_": "/works/OL1W", "type": "edition", "title": "Odyssey", "language": ["grc"], "ebook_access": "public"}

@@ -74,6 +74,95 @@ fn serves_select_ping_and_post_forms() -> TestResult {
     Ok(())
 }
 
+fn form(pairs: &[(&str, &str)]) -> String {
+    let enc = |s: &str| {
+        s.bytes()
+            .map(|b| match b {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' => {
+                    char::from(b).to_string()
+                }
+                _ => format!("%{b:02X}"),
+            })
+            .collect::<String>()
+    };
+    pairs
+        .iter()
+        .map(|(k, v)| format!("{}={}", enc(k), enc(v)))
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+fn keys(v: &Value) -> Vec<&str> {
+    v.pointer("/response/docs")
+        .and_then(Value::as_array)
+        .map(|docs| {
+            docs.iter()
+                .filter_map(|d| d.get("key").and_then(Value::as_str))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[test]
+fn book_search_shape_with_block_join_ranges_and_or() -> TestResult {
+    let schema = Schema::load(Path::new("tests/data/conf"))?;
+    let store = Store::load(schema, Path::new("tests/data/mini.jsonl"))?;
+    let addr = free_addr()?;
+    let bound = addr.clone();
+    thread::spawn(move || serve(&store, &bound));
+    thread::sleep(Duration::from_millis(300));
+    let post = |pairs: &[(&str, &str)]| {
+        request(
+            &addr,
+            "POST /solr/openlibrary/select HTTP/1.1\r\nContent-Type: application/x-www-form-urlencoded",
+            &form(pairs),
+        )
+    };
+
+    let book_search = [
+        (
+            "q",
+            "+({!edismax q.op=\"AND\" qf=\"alternative_title^40 author_name^40\" pf=\"alternative_title^50\" boost=\"sum(1,edition_count)\" v=$userWorkQuery}) +(_query_:\"{!parent which=type:work v=$fullEdFilterQuery filters=$editions.fq}\" OR edition_count:0)",
+        ),
+        ("userWorkQuery", "carroll"),
+        (
+            "fullEdFilterQuery",
+            "({!edismax v=$userEdFilterQuery qf=\"title publisher\"})",
+        ),
+        ("userEdFilterQuery", "+language:eng"),
+        ("editions.fq", "type:edition"),
+        ("editions.fq", "ebook_access:[borrowable TO *]"),
+        ("fq", "type:work"),
+        ("fl", "key,editions:[subquery]"),
+    ];
+    let got = post(&book_search)?;
+    assert!(got["responseHeader"]["warning"].is_null(), "{got}");
+    assert_eq!(got["response"]["numFound"], 1);
+    assert_eq!(keys(&got), ["/works/OL2W"]);
+
+    let ranges = post(&[
+        ("q", "*:*"),
+        (
+            "fq",
+            "edition_count:[20 TO *] OR first_publish_year:[* TO 1000}",
+        ),
+        ("sort", "edition_count desc"),
+        ("fl", "key"),
+    ])?;
+    assert_eq!(keys(&ranges), ["/works/OL2W", "/works/OL1W"]);
+
+    let terms = post(&[
+        ("q", "{!terms f=key v=/works/OL1W,/works/OL4W}"),
+        ("fl", "key"),
+    ])?;
+    assert_eq!(terms["response"]["numFound"], 2);
+
+    let unsupported = post(&[("q", "title:[a TO b]")])?;
+    assert_eq!(unsupported["response"]["numFound"], 0);
+    assert!(unsupported["responseHeader"]["warning"].is_string());
+    Ok(())
+}
+
 #[test]
 fn analyzers_match_recorded_python_output() {
     let a = Analyzer::new();
