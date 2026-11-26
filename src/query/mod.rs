@@ -8,10 +8,13 @@
 //! `mm`), local params (`{!edismax}`, `{!lucene}`, `{!terms}`, `{!field}`, `{!prefix}`,
 //! `{!parent}`), `$param` dereference and `_query_:"..."`.
 //!
-//! Not yet: function boosts (`boost`, `bf`: parsed and ignored, see the step 3 seam in
-//! [`select`]), sorts other than score or one numeric field, facets, grouping, cursors,
-//! and the `[subquery]` / `[child]` document transformers (their `fl` items are ignored;
-//! they do not change `numFound`).
+//! Scores are rescored by function queries (edismax `boost=`, the request `boost` outside
+//! edismax, `bf`; see [`crate::function`]) and ordered by `sort` (score, fields, functions,
+//! `random_*`; see `sort`); either one makes the search score every hit before taking the
+//! page.
+//!
+//! Not yet: facets, grouping, cursors, and the `[subquery]` / `[child]` document
+//! transformers (their `fl` items are ignored; they do not change `numFound`).
 
 pub mod ast;
 mod compile;
@@ -20,12 +23,14 @@ mod join;
 pub mod lexer;
 pub mod localparams;
 pub mod parser;
+mod sort;
 
 use serde_json::{Map, Value};
-use tantivy::collector::{Count, DocSetCollector, TopDocs};
+use tantivy::collector::{Count, TopDocs};
 use tantivy::{DocAddress, Searcher};
 
 use crate::Error;
+use crate::function::Rescore;
 use crate::schema::glob_match;
 use crate::store::Store;
 use compile::Compiler;
@@ -102,65 +107,73 @@ pub fn select(store: &Store, params: &Params) -> Result<Selection, Error> {
             return unsupported(format!("parameter {unsupported_param}"));
         }
     }
-    let sort = parse_sort(store, params.get("sort"))?;
     let fqs: Vec<&str> = params.all("fq").collect();
     let mut compiler = Compiler::new(store, params);
     let query = compiler.run_query(params.get("q").unwrap_or("*:*"), &fqs)?;
-    let _seam = FunctionScoring {
-        boosts: compiler.boosts,
-        request_boost: params
-            .get("boost")
-            .filter(|_| !matches!(params.get("defType"), Some("edismax" | "dismax"))),
-        bf: params.get("bf"),
-    };
+    let boosts = std::mem::take(&mut compiler.boosts);
+    // The request `boost` applies only outside edismax, where `boost` is edismax's own.
+    let request_boost = params
+        .get("boost")
+        .filter(|b| !b.is_empty() && !matches!(params.get("defType"), Some("edismax" | "dismax")));
+    let rescore = Rescore::new(
+        boosts.iter().map(String::as_str).chain(request_boost),
+        params.get("bf").filter(|b| !b.is_empty()),
+        params,
+    );
+    let sort_keys = params
+        .get("sort")
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|spec| sort::parse_sort(store, spec, params));
     let searcher = store.reader.searcher();
-    let (num_found, ords) = match sort {
-        None => {
-            let (count, top) = if rows == 0 {
-                (searcher.search(&*query, &Count)?, Vec::new())
-            } else {
-                searcher.search(
-                    &*query,
-                    &(
-                        Count,
-                        TopDocs::with_limit(rows).and_offset(start).order_by_score(),
-                    ),
-                )?
-            };
-            let ords = top
-                .into_iter()
-                .map(|(_, addr)| ord_of(&searcher, addr))
-                .collect::<Result<Vec<_>, _>>()?;
-            (count, ords)
+    let (num_found, ords) = if sort_keys.is_none() && rescore.is_empty() {
+        let (count, top) = if rows == 0 {
+            (searcher.search(&*query, &Count)?, Vec::new())
+        } else {
+            searcher.search(
+                &*query,
+                &(
+                    Count,
+                    TopDocs::with_limit(rows).and_offset(start).order_by_score(),
+                ),
+            )?
+        };
+        let ords = top
+            .into_iter()
+            .map(|(_, addr)| ord_of(&searcher, addr))
+            .collect::<Result<Vec<_>, _>>()?;
+        (count, ords)
+    } else {
+        // A function or a sort can move any hit into the page, so every hit is scored.
+        let all = usize::try_from(searcher.num_docs())
+            .unwrap_or(usize::MAX)
+            .max(1);
+        let top = searcher.search(&*query, &TopDocs::with_limit(all).order_by_score())?;
+        let mut hits = top
+            .into_iter()
+            .map(|(score, addr)| {
+                let ord = ord_of(&searcher, addr)?;
+                let doc = store.docs.get(ord).unwrap_or(&Value::Null);
+                Ok((ord, rescore.apply(doc, f64::from(score))))
+            })
+            .collect::<Result<Vec<sort::Hit>, Error>>()?;
+        match &sort_keys {
+            Some(keys) => sort::apply(store, keys, &mut hits),
+            None => hits.sort_by(|a, b| {
+                b.1.partial_cmp(&a.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then(a.0.cmp(&b.0))
+            }),
         }
-        Some((field, descending)) => {
-            let hits = searcher.search(&*query, &DocSetCollector)?;
-            let mut ords = hits
-                .into_iter()
-                .map(|addr| ord_of(&searcher, addr))
-                .collect::<Result<Vec<_>, _>>()?;
-            let key = |ord: &usize| {
-                store
-                    .docs
-                    .get(*ord)
-                    .and_then(|d| first_number(d.get(field.as_str())))
-            };
-            // Documents without a value sort last in both directions, ties by index order.
-            ords.sort_by(|a, b| {
-                let by_value = match (key(a), key(b)) {
-                    (Some(x), Some(y)) => {
-                        let o = x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal);
-                        if descending { o.reverse() } else { o }
-                    }
-                    (Some(_), None) => std::cmp::Ordering::Less,
-                    (None, Some(_)) => std::cmp::Ordering::Greater,
-                    (None, None) => std::cmp::Ordering::Equal,
-                };
-                by_value.then(a.cmp(b))
-            });
-            let found = ords.len();
-            (found, ords.into_iter().skip(start).take(rows).collect())
-        }
+        let found = hits.len();
+        (
+            found,
+            hits.into_iter()
+                .skip(start)
+                .take(rows)
+                .map(|(ord, _)| ord)
+                .collect(),
+        )
     };
     let fl = field_list(params.get("fl"));
     let docs = ords
@@ -175,31 +188,12 @@ pub fn select(store: &Store, params: &Params) -> Result<Selection, Error> {
     })
 }
 
-/// Step 3 seam: the function queries that rescore hits. Python multiplies each hit's
-/// score by every `boost` expression (edismax `boost=` collected while compiling, plus the
-/// request `boost` when `defType` is not edismax), then adds each `bf` term, and orders by
-/// the result. Until the function evaluator exists these are parsed and ignored, so the
-/// ranking is plain BM25 (`numFound` does not depend on them).
-#[expect(dead_code, reason = "read by the step 3 function evaluator")]
-struct FunctionScoring<'a> {
-    boosts: Vec<String>,
-    request_boost: Option<&'a str>,
-    bf: Option<&'a str>,
-}
-
 fn number(params: &Params, name: &str, default: usize) -> Result<usize, Error> {
     params.get(name).map_or(Ok(default), |v| {
         v.trim()
             .parse()
             .map_err(|_| Error::Other(format!("bad {name}: {v}")))
     })
-}
-
-fn first_number(v: Option<&Value>) -> Option<f64> {
-    match v? {
-        Value::Array(items) => items.first().and_then(Value::as_f64),
-        other => other.as_f64(),
-    }
 }
 
 pub(crate) fn ord_of(searcher: &Searcher, addr: DocAddress) -> Result<usize, Error> {
@@ -211,33 +205,6 @@ pub(crate) fn ord_of(searcher: &Searcher, addr: DocAddress) -> Result<usize, Err
         .first(addr.doc_id)
         .and_then(|o| usize::try_from(o).ok())
         .ok_or_else(|| Error::Other("document without ord".into()))
-}
-
-/// `sort=<numeric field> asc|desc`, or `None` for score order.
-fn parse_sort(store: &Store, sort: Option<&str>) -> Result<Option<(String, bool)>, Error> {
-    let Some(sort) = sort.map(str::trim).filter(|s| !s.is_empty()) else {
-        return Ok(None);
-    };
-    let mut it = sort.split_whitespace();
-    let (Some(name), Some(dir), None) = (it.next(), it.next(), it.next()) else {
-        return unsupported(format!("sort {sort}"));
-    };
-    let descending = match dir {
-        "asc" => false,
-        "desc" => true,
-        _ => return unsupported(format!("sort {sort}")),
-    };
-    if name == "score" {
-        return if descending {
-            Ok(None)
-        } else {
-            unsupported("sort score asc")
-        };
-    }
-    match store.schema.get(name) {
-        Some(f) if f.kind.is_numeric() => Ok(Some((f.name.clone(), descending))),
-        _ => unsupported(format!("sort {sort}")),
-    }
 }
 
 /// The parsed `fl`: whether `*` was asked for (or `fl` was empty) and the name patterns.
