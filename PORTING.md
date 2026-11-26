@@ -1,6 +1,6 @@
 # Porting minisolr to Rust: progress and plan
 
-Status: **prototype done, port not started.** This file tracks how far the Rust version is from replacing the Python one in [minisolr](../minisolr), what the prototype showed, and what to do next. Numbers marked *(est.)* are estimates, not measurements.
+Status: **prototype done; step 1 (schema) done.** This file tracks how far the Rust version is from replacing the Python one in [minisolr](../minisolr), what the prototype showed, and what to do next. Numbers marked *(est.)* are estimates, not measurements.
 
 ## Why we are doing this
 
@@ -33,17 +33,23 @@ The 112 captured requests it cannot answer (they return an empty result with a w
 | Needs | Requests | Fixed by step |
 |---|---|---|
 | Multi-clause `+(...)`, boosted constants, subqueries, `OR` | 76 | 2 |
-| `osp_count` and `trending_score_hourly_sum` fields (not in the hard-coded table) | 14 | 1 |
+| `osp_count` and `trending_score_hourly_sum` fields (not in the hard-coded table) | 14 | 1, but also 2 (see step 1 results) |
 | Sorts on functions, `random_*` or non-table fields | 16 | 4 |
 | Facets | 6 | 5 |
 
-Also not done: `/update`, persistence, `/get`, `/export`, nested documents and block join, JSON Request/Facet API, highlighting, spellcheck, query-time synonyms, schema XML parsing (the 38-field table is hard-coded).
+Also not done: `/update`, persistence, `/get`, `/export`, nested documents and block join, JSON Request/Facet API, highlighting, spellcheck, query-time synonyms. (Schema XML parsing was added in step 1.)
 
 ## Next steps, in order
 
 Each step has a measurable gate: the language-independent fixtures in `../minisolr/fixtures` (267 replayed requests with real Solr's answers, 66 probes) and the end-to-end harness in `../minisolr/e2e`.
 
-1. **Read the schema.** Parse `managed-schema.xml` and `enumsConfig.xml` (fields, dynamic fields, copyFields, types, enums) instead of the hard-coded table. Likely adds one small XML crate (`roxmltree`). *Gate: the 14 `osp_count`/trending requests answer; parity still 99.86% or better.* About 1-2 days *(est.)*.
+1. [x] **Read the schema.** Parse `managed-schema.xml` and `enumsConfig.xml` (fields, dynamic fields, copyFields, types, enums) instead of the hard-coded table. Likely adds one small XML crate (`roxmltree`). *Gate: the 14 `osp_count`/trending requests answer; parity still 99.86% or better.* About 1-2 days *(est.)*.
+   **Done** (`src/schema.rs`, `roxmltree` 0.20, no other crates). Measured:
+   - Replay (`tools/replay.py`): 159/267 answerable (was 155), `numFound` equal 159/159, top-10 set equal 146/159 (was 142), key overlap 474/510 = 92.94%. The 4 new answers sort on `ratings_sortable`.
+   - The 14 `osp_count`/trending requests do **not** answer yet, and could not with a schema alone: the prototype rejected them on the unknown field first, but all 14 also use range syntax. 12 have `fq=osp_count:[1 TO *] OR readinglog_count:[5 TO *] OR edition_count:[5 TO *]` (ranges plus `OR`), 2 have `trending_score_hourly_sum:[1 TO *] AND readinglog_count:[4 TO *]`, `fq=ebook_access:[borrowable TO *]` (an enum range) and `sort=def(trending_z_score, 0) desc`. They move to step 2 (and step 4 for the two function sorts).
+   - Analyzer parity now covers every text field in the dev data, 23 fields including the `title_suggest` copyField: 2,467/2,470 = 99.88% (was 2,114/2,117 over 16 fields); the 3 misses are the known Telugu Mc/Mn case.
+   - Memory, same 155-request subset, 1,300 queries: RSS 10.6 MiB, `footprint` 10-14 MiB (hard-coded prototype in the same session: 9.8 MiB, 12 MiB); unchanged within noise. p50 1.35 ms, p95 3.0 ms (prototype 1.11 / 2.7 ms in the same session).
+   - Unanswered now (108): 67 `+({!edismax ...})` multi-clause queries, 12 `osp_count` range + `OR` filters, 3 `ebook_access:[borrowable TO *]`, 3 `ia:*`, 3 bare `OR`, 2 trending ranges (step 2); 4 `def(first_publish_year, 9999)`, 4 `def(trending_z_score, 0)`, 4 `random_1` sorts (step 4); 6 facets (step 5).
 2. **Lucene query parser and edismax.** Classic boolean semantics (`+ - AND OR NOT`, groups, ranges, wildcards, fuzzy, slop), local params (`{!edismax}`, `{!terms}`, `{!field}`, `{!prefix}`), `$param` dereference, `qf`/`pf`/`pf2`/`pf3`, `q.op`, `mm`. The biggest piece (Python's `query.py` is 624 lines). *Gate: the 76 multi-clause requests answer.* About 4-6 days *(est.)*.
 3. **Function queries and boost.** `sum`, `mul`, `div`, `log10`, `def`, `min`, `max`, `field`, `recip`, applied after scoring, plus `bf`. *Gate: top-10 sets equal on the 13 requests that missed; overlap at or above Python's 98.76%.* About 1-2 days *(est.)*.
 4. **Sorting.** Field sorts, function sorts, `random_*` (MD5-based as in Python), ICU-style sort keys, enum order. *Gate: the 16 sort requests.* About 1 day *(est.)*.
@@ -64,4 +70,8 @@ Remaining total: roughly **15-22 working days** *(est.)* for someone fluent in R
 
 ## Build budget
 
-Keep builds small: `nice -n 19`, `CARGO_BUILD_JOBS=2`, `cargo check` and `cargo clippy` while iterating, one release build per measurement, `CARGO_HOME` and `CARGO_TARGET_DIR` outside the repo and deleted afterwards.
+Keep builds small: `nice -n 19`, `CARGO_BUILD_JOBS=2`, `cargo check` and `cargo clippy` while iterating, one release build per measurement, `CARGO_HOME` and `CARGO_TARGET_DIR` outside the repo and deleted afterwards. After step 1 the target directory is about 0.8 GB with debug and release builds.
+
+## Tools
+
+`tools/replay.py` (replay against golden, the main progress meter), `tools/bench.py` (RSS, `footprint`, latency) and `tools/dump_tokens.py` (Python tokens for `parity`); usage is in each file's header and in `README.md`.

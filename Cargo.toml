@@ -3,7 +3,7 @@ name = "minisolr-rs"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
-description = "Throwaway Rust prototype of minisolr /select, built to measure memory and analyzer parity"
+description = "Rust port of minisolr, a small Solr stand-in for Open Library development"
 license = "MIT"
 publish = false
 

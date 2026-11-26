@@ -1,4 +1,4 @@
-//! Solr analyzer chains for the fields the prototype indexes.
+//! Solr analyzer chains for the text fields.
 //!
 //! Three chains are covered, taken from `managed-schema.xml`:
 //!
@@ -6,6 +6,9 @@
 //!   keyword marker, Porter stemmer.
 //! * `text_international`: standard tokenizer, `icuFolding` (the stop list is empty).
 //! * `text_general`: standard tokenizer, lowercase (the stop list is empty).
+//!
+//! Field types with any other analyzer use [`Chain::WhitespaceLowercase`] as a fallback
+//! (see `schema::AnalyzerSpec::chain`).
 //!
 //! Query-time synonym expansion is not implemented. `icuFolding` is approximated by
 //! NFKD, dropping combining marks, case folding and a small extra map, like the Python code.

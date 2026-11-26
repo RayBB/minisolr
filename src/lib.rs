@@ -1,7 +1,7 @@
-//! Throwaway Rust prototype of minisolr's `/select`.
+//! Rust port of minisolr's `/select`, in progress (see `PORTING.md`).
 //!
-//! It exists to measure memory and to check analyzer parity against the Python
-//! implementation, not to replace it. Fields come from Solr's `managed-schema.xml`.
+//! Fields come from Solr's `managed-schema.xml`; the analyzer chains reproduce the
+//! Python implementation token for token.
 
 #![forbid(unsafe_code)]
 
