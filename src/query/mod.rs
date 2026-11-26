@@ -9,6 +9,8 @@
 
 pub mod ast;
 pub mod lexer;
+pub mod localparams;
+pub mod parser;
 
 use serde_json::{Map, Value};
 use tantivy::collector::{Count, DocSetCollector, TopDocs};
