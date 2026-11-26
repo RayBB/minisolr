@@ -220,7 +220,7 @@ pub fn apply(
         match result {
             Ok(()) => {}
             Err(UpdateError::Doc(msg)) if tolerant => {
-                errors.push(json!({"type": "ADD", "message": msg}))
+                errors.push(json!({"type": "ADD", "message": msg}));
             }
             Err(UpdateError::Doc(msg)) => {
                 return Outcome {
