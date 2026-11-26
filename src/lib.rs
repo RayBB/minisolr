@@ -1,4 +1,5 @@
-//! Rust port of minisolr's `/select`, in progress (see `PORTING.md`).
+//! Rust port of minisolr, a small Solr stand-in for Open Library development (see
+//! `PORTING.md`).
 //!
 //! Fields come from Solr's `managed-schema.xml`; the analyzer chains reproduce the
 //! Python implementation token for token.
@@ -8,11 +9,13 @@
 pub mod analysis;
 pub mod error;
 pub mod function;
+pub mod index;
 pub mod md5;
 pub mod porter;
 pub mod query;
 pub mod schema;
 pub mod server;
 pub mod store;
+pub mod update;
 
 pub use error::Error;

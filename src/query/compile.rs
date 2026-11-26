@@ -23,8 +23,8 @@ use super::edismax::Mm;
 use super::parser;
 use crate::Error;
 use crate::analysis::fold;
+use crate::index::Index;
 use crate::schema::Kind;
-use crate::store::Store;
 
 /// A compiled clause: `None` when it vanished.
 pub(super) type QueryResult = Result<Option<Box<dyn Query>>, Error>;
@@ -78,7 +78,7 @@ pub(super) struct LeafOpts {
 
 /// Compiles the query strings of one request.
 pub(crate) struct Compiler<'p> {
-    pub(super) store: &'p Store,
+    pub(super) store: &'p Index,
     pub(super) params: &'p Params,
     /// Function-query `boost` expressions met while compiling (edismax `boost=`, already
     /// dereferenced); `select` multiplies each hit's score by every one of them.
@@ -87,7 +87,7 @@ pub(crate) struct Compiler<'p> {
 }
 
 impl<'p> Compiler<'p> {
-    pub(crate) fn new(store: &'p Store, params: &'p Params) -> Self {
+    pub(crate) fn new(store: &'p Index, params: &'p Params) -> Self {
         Self {
             store,
             params,

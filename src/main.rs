@@ -3,15 +3,16 @@
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::process::ExitCode;
+use std::sync::Arc;
 
 use minisolr_rs::Error;
 use minisolr_rs::analysis::Analyzer;
 use minisolr_rs::schema::{Kind, Schema};
-use minisolr_rs::server::serve;
+use minisolr_rs::server::{Core, serve};
 use minisolr_rs::store::Store;
 use serde_json::Value;
 
-const USAGE: &str = "usage:\n  minisolr-rs serve <conf-dir> <docs.jsonl> [addr=127.0.0.1:8983]\n  minisolr-rs parity <conf-dir> <tokens.jsonl>\n\n<conf-dir> holds managed-schema.xml and enumsConfig.xml.";
+const USAGE: &str = "usage:\n  minisolr-rs serve <conf-dir> <data-dir | docs.jsonl> [addr=127.0.0.1:8983]\n  minisolr-rs parity <conf-dir> <tokens.jsonl>\n\n<conf-dir> holds managed-schema.xml and enumsConfig.xml. A data directory (created if\nmissing) persists updates in <data-dir>/docs.jsonl; a .jsonl file is loaded and updates\nstay in memory.";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -35,9 +36,18 @@ fn main() -> ExitCode {
     }
 }
 
-fn run_serve(conf: &str, docs: &str, addr: &str) -> Result<(), Error> {
-    let schema = Schema::load(Path::new(conf))?;
-    serve(&Store::load(schema, Path::new(docs))?, addr)
+fn run_serve(conf: &str, data: &str, addr: &str) -> Result<(), Error> {
+    let schema = Arc::new(Schema::load(Path::new(conf))?);
+    let data = Path::new(data);
+    let store = if data.is_file() {
+        let mut store = Store::new(Arc::clone(&schema), None);
+        store.load_file(data)?;
+        store
+    } else {
+        std::fs::create_dir_all(data)?;
+        Store::open(Arc::clone(&schema), data)?
+    };
+    serve(&Arc::new(Core::new(store, schema)), addr)
 }
 
 /// Compares Rust index-time tokens with Python's, dumped as JSON lines of

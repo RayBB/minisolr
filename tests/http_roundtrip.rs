@@ -8,9 +8,10 @@ use std::time::Duration;
 
 use minisolr_rs::analysis::{Analyzer, Chain};
 use minisolr_rs::schema::Schema;
-use minisolr_rs::server::serve;
+use minisolr_rs::server::{Core, serve};
 use minisolr_rs::store::Store;
 use serde_json::Value;
+use std::sync::Arc;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
@@ -32,14 +33,28 @@ fn request(addr: &str, head: &str, body: &str) -> TestResult<Value> {
     Ok(serde_json::from_str(json)?)
 }
 
-#[test]
-fn serves_select_ping_and_post_forms() -> TestResult {
-    let schema = Schema::load(Path::new("tests/data/conf"))?;
-    let store = Store::load(schema, Path::new("tests/data/mini.jsonl"))?;
+/// Starts a server on a free port: a `.jsonl` file is loaded in memory, a directory is
+/// opened as a persistent data directory.
+fn start(data: &Path) -> TestResult<String> {
+    let schema = Arc::new(Schema::load(Path::new("tests/data/conf"))?);
+    let store = if data.is_file() {
+        let mut store = Store::new(Arc::clone(&schema), None);
+        store.load_file(data)?;
+        store
+    } else {
+        Store::open(Arc::clone(&schema), data)?
+    };
+    let core = Arc::new(Core::new(store, schema));
     let addr = free_addr()?;
     let bound = addr.clone();
-    thread::spawn(move || serve(&store, &bound));
+    thread::spawn(move || serve(&core, &bound));
     thread::sleep(Duration::from_millis(300));
+    Ok(addr)
+}
+
+#[test]
+fn serves_select_ping_and_post_forms() -> TestResult {
+    let addr = start(Path::new("tests/data/mini.jsonl"))?;
 
     let ping = request(&addr, "GET /solr/openlibrary/admin/ping HTTP/1.1", "")?;
     assert_eq!(ping["status"], "OK");
@@ -105,12 +120,7 @@ fn keys(v: &Value) -> Vec<&str> {
 
 #[test]
 fn book_search_shape_with_block_join_ranges_and_or() -> TestResult {
-    let schema = Schema::load(Path::new("tests/data/conf"))?;
-    let store = Store::load(schema, Path::new("tests/data/mini.jsonl"))?;
-    let addr = free_addr()?;
-    let bound = addr.clone();
-    thread::spawn(move || serve(&store, &bound));
-    thread::sleep(Duration::from_millis(300));
+    let addr = start(Path::new("tests/data/mini.jsonl"))?;
     let post = |pairs: &[(&str, &str)]| {
         request(
             &addr,
@@ -180,12 +190,7 @@ fn analyzers_match_recorded_python_output() {
 
 #[test]
 fn function_boosts_and_sorts() -> TestResult {
-    let schema = Schema::load(Path::new("tests/data/conf"))?;
-    let store = Store::load(schema, Path::new("tests/data/mini.jsonl"))?;
-    let addr = free_addr()?;
-    let bound = addr.clone();
-    thread::spawn(move || serve(&store, &bound));
-    thread::sleep(Duration::from_millis(300));
+    let addr = start(Path::new("tests/data/mini.jsonl"))?;
     let post = |pairs: &[(&str, &str)]| {
         request(
             &addr,

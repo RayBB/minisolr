@@ -13,10 +13,10 @@ use serde_json::Value;
 use crate::analysis::fold;
 use crate::function::ast::Expr;
 use crate::function::parse::parse as parse_function;
+use crate::index::Index;
 use crate::md5;
 use crate::query::Params;
 use crate::schema::Kind;
-use crate::store::Store;
 
 /// A hit: the document's `ord` and its final score.
 pub(super) type Hit = (usize, f64);
@@ -71,7 +71,7 @@ impl SortValue {
 /// at the last space; only `desc` (any case) is descending. An item without a space is
 /// Python's `rpartition` result: an empty expression, which no document has.
 pub(super) fn parse_sort<'a>(
-    store: &'a Store,
+    store: &'a Index,
     spec: &'a str,
     params: &'a Params,
 ) -> Vec<SortKey<'a>> {
@@ -88,7 +88,7 @@ pub(super) fn parse_sort<'a>(
         .collect()
 }
 
-fn by<'a>(store: &'a Store, expr: &'a str, params: &'a Params) -> By<'a> {
+fn by<'a>(store: &'a Index, expr: &'a str, params: &'a Params) -> By<'a> {
     if expr == "score" {
         By::Score
     } else if expr.starts_with("random_") {
@@ -128,13 +128,13 @@ fn split_top_level(spec: &str) -> impl Iterator<Item = &str> {
 }
 
 /// Orders `hits` by `keys`.
-pub(super) fn apply(store: &Store, keys: &[SortKey<'_>], hits: &mut Vec<Hit>) {
+pub(super) fn apply(store: &Index, keys: &[SortKey<'_>], hits: &mut Vec<Hit>) {
     hits.sort_by_key(|h| h.0);
     for key in keys.iter().rev() {
         let mut have = Vec::with_capacity(hits.len());
         let mut missing = Vec::new();
         for hit in hits.drain(..) {
-            let doc = store.docs.get(hit.0).unwrap_or(&Value::Null);
+            let doc = store.row(hit.0);
             match key.value(doc, hit.1) {
                 Some(v) => have.push((hit, v)),
                 None => missing.push(hit),

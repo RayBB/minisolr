@@ -27,9 +27,7 @@ impl Compiler<'_> {
         let key_name = store.schema.unique_key.as_str();
         let mut roots: BTreeSet<&str> = BTreeSet::new();
         for addr in searcher.search(&*query, &DocSetCollector)? {
-            let Some(doc) = store.docs.get(ord_of(&searcher, addr)?) else {
-                continue;
-            };
+            let doc = store.row(ord_of(&searcher, addr)?);
             let root = doc.get("_root_").and_then(Value::as_str);
             if let Some(root) = root
                 && doc.get(key_name).and_then(Value::as_str) != Some(root)

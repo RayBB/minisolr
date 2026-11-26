@@ -13,8 +13,8 @@
 //! `random_*`; see `sort`); either one makes the search score every hit before taking the
 //! page.
 //!
-//! Not yet: facets, grouping, cursors, and the `[subquery]` / `[child]` document
-//! transformers (their `fl` items are ignored; they do not change `numFound`).
+//! `fl` takes names, globs, `score`, `alias:field`, `[child]` and `alias:[subquery]`, as
+//! Python minisolr's `project`. Not yet: facets, grouping, cursors.
 
 pub mod ast;
 mod compile;
@@ -26,13 +26,13 @@ pub mod parser;
 mod sort;
 
 use serde_json::{Map, Value};
-use tantivy::collector::{Count, TopDocs};
+use tantivy::collector::{Count, DocSetCollector, TopDocs};
 use tantivy::{DocAddress, Searcher};
 
 use crate::Error;
 use crate::function::Rescore;
+use crate::index::Index;
 use crate::schema::glob_match;
-use crate::store::Store;
 use compile::Compiler;
 
 /// Request parameters; a name can repeat.
@@ -62,6 +62,12 @@ impl Params {
             .iter()
             .filter(move |(k, _)| k == name)
             .map(|(_, v)| v.as_str())
+    }
+
+    /// The pairs in request order.
+    #[must_use]
+    pub fn pairs(&self) -> &[(String, String)] {
+        &self.0
     }
 
     /// The pairs as a JSON object (last value wins), for the response header.
@@ -96,8 +102,45 @@ fn unsupported<T>(what: impl Into<String>) -> Result<T, Error> {
 /// # Errors
 /// [`Error::Unsupported`] for features outside the supported subset; other variants for
 /// index failures.
-pub fn select(store: &Store, params: &Params) -> Result<Selection, Error> {
-    let rows = number(params, "rows", 10)?;
+pub fn select(store: &Index, params: &Params) -> Result<Selection, Error> {
+    run(store, params, false, FL_SEPARATORS)
+}
+
+/// Runs an `/export` request: a `/select` that returns every hit from `start` on, as
+/// Python minisolr does (`rows` is ignored).
+///
+/// # Errors
+/// As [`select`].
+pub fn export(store: &Index, params: &Params) -> Result<Selection, Error> {
+    run(store, params, true, FL_SEPARATORS)
+}
+
+/// The rows matching `q`, parsed as Python's update handler does for delete-by-query:
+/// the Lucene parser with no request parameters (no `df`, `q.op=OR`).
+///
+/// # Errors
+/// As [`select`].
+pub fn matching_rows(store: &Index, q: &str) -> Result<Vec<usize>, Error> {
+    let params = Params::default();
+    let mut compiler = Compiler::new(store, &params);
+    let query = compiler.run_query(q, &[])?;
+    let searcher = store.reader.searcher();
+    searcher
+        .search(&*query, &DocSetCollector)?
+        .into_iter()
+        .map(|addr| ord_of(&searcher, addr))
+        .collect()
+}
+
+/// What separates `fl` items in a top-level request (subqueries split on commas only).
+const FL_SEPARATORS: &[char] = &[',', ' ', '\t', '\n', '\r'];
+
+fn run(store: &Index, params: &Params, export: bool, fl_seps: &[char]) -> Result<Selection, Error> {
+    let rows = if export {
+        store.docs.len().max(1)
+    } else {
+        number(params, "rows", 10)?
+    };
     let start = number(params, "start", 0)?;
     if matches!(params.get("facet"), Some("true" | "on")) || params.get("facet.field").is_some() {
         return unsupported("facets");
@@ -126,7 +169,7 @@ pub fn select(store: &Store, params: &Params) -> Result<Selection, Error> {
         .filter(|s| !s.is_empty())
         .map(|spec| sort::parse_sort(store, spec, params));
     let searcher = store.reader.searcher();
-    let (num_found, ords) = if sort_keys.is_none() && rescore.is_empty() {
+    let (num_found, page) = if sort_keys.is_none() && rescore.is_empty() {
         let (count, top) = if rows == 0 {
             (searcher.search(&*query, &Count)?, Vec::new())
         } else {
@@ -138,11 +181,11 @@ pub fn select(store: &Store, params: &Params) -> Result<Selection, Error> {
                 ),
             )?
         };
-        let ords = top
+        let page = top
             .into_iter()
-            .map(|(_, addr)| ord_of(&searcher, addr))
-            .collect::<Result<Vec<_>, _>>()?;
-        (count, ords)
+            .map(|(score, addr)| Ok((ord_of(&searcher, addr)?, f64::from(score))))
+            .collect::<Result<Vec<sort::Hit>, Error>>()?;
+        (count, page)
     } else {
         // A function or a sort can move any hit into the page, so every hit is scored.
         let all = usize::try_from(searcher.num_docs())
@@ -153,8 +196,7 @@ pub fn select(store: &Store, params: &Params) -> Result<Selection, Error> {
             .into_iter()
             .map(|(score, addr)| {
                 let ord = ord_of(&searcher, addr)?;
-                let doc = store.docs.get(ord).unwrap_or(&Value::Null);
-                Ok((ord, rescore.apply(doc, f64::from(score))))
+                Ok((ord, rescore.apply(store.row(ord), f64::from(score))))
             })
             .collect::<Result<Vec<sort::Hit>, Error>>()?;
         match &sort_keys {
@@ -166,21 +208,13 @@ pub fn select(store: &Store, params: &Params) -> Result<Selection, Error> {
             }),
         }
         let found = hits.len();
-        (
-            found,
-            hits.into_iter()
-                .skip(start)
-                .take(rows)
-                .map(|(ord, _)| ord)
-                .collect(),
-        )
+        (found, hits.into_iter().skip(start).take(rows).collect())
     };
-    let fl = field_list(params.get("fl"));
-    let docs = ords
+    let fl = FieldList::parse(params.get("fl").unwrap_or("*").trim(), fl_seps);
+    let docs = page
         .into_iter()
-        .filter_map(|o| store.docs.get(o))
-        .map(|d| project(store, d, &fl))
-        .collect();
+        .map(|(ord, score)| project(store, ord, score, &fl, params))
+        .collect::<Result<_, _>>()?;
     Ok(Selection {
         num_found,
         start,
@@ -207,34 +241,59 @@ pub(crate) fn ord_of(searcher: &Searcher, addr: DocAddress) -> Result<usize, Err
         .ok_or_else(|| Error::Other("document without ord".into()))
 }
 
-/// The parsed `fl`: whether `*` was asked for (or `fl` was empty) and the name patterns.
-struct FieldList<'a> {
+/// The parsed `fl`: whether `*` was asked for (or `fl` was empty), the items in order
+/// (for `score`, `[child]`, `alias:[subquery]` and `alias:field`) and the name patterns.
+pub(crate) struct FieldList<'a> {
     star: bool,
+    items: Vec<&'a str>,
     patterns: Vec<&'a str>,
 }
 
-fn field_list(fl: Option<&str>) -> FieldList<'_> {
-    let items: Vec<&str> = fl
-        .unwrap_or_default()
-        .split([',', ' '])
-        .filter(|s| !s.is_empty())
-        .collect();
-    FieldList {
-        star: items.is_empty() || items.contains(&"*"),
-        patterns: items
-            .into_iter()
-            .filter(|p| *p != "*" && !p.contains(':') && !p.starts_with('['))
-            .collect(),
+impl<'a> FieldList<'a> {
+    /// Splits `fl` on runs of `seps` outside `[...]`, as Python's `re.split`.
+    pub(crate) fn parse(fl: &'a str, seps: &[char]) -> Self {
+        let mut items = Vec::new();
+        let mut depth = 0usize;
+        let mut begin = 0;
+        for (i, c) in fl.char_indices() {
+            match c {
+                '[' => depth += 1,
+                ']' => depth = depth.saturating_sub(1),
+                c if depth == 0 && seps.contains(&c) => {
+                    items.extend(fl.get(begin..i).filter(|s| !s.is_empty()));
+                    begin = i + c.len_utf8();
+                }
+                _ => {}
+            }
+        }
+        items.extend(fl.get(begin..).filter(|s| !s.is_empty()));
+        Self {
+            star: items.is_empty() || items.contains(&"*"),
+            patterns: items
+                .iter()
+                .copied()
+                .filter(|p| *p != "*" && !p.contains(':') && !p.starts_with('['))
+                .collect(),
+            items,
+        }
     }
 }
 
 /// A returned document, as Python's `project`: the copyField-expanded row, minus block
 /// join internals and names outside the schema; a field is kept when an `fl` pattern
 /// names it or when `fl` has `*` and the field is returned in `*`. Single values of
-/// multiValued fields become one-element arrays.
-fn project(store: &Store, doc: &Value, fl: &FieldList<'_>) -> Value {
-    let Value::Object(map) = doc else {
-        return doc.clone();
+/// multiValued fields become one-element arrays. Then the `fl` items in order: `score`,
+/// `[child]` (the rows sharing this row's key as `_root_`, as `_childDocuments_`),
+/// `alias:[subquery]` and `alias:field`.
+pub(crate) fn project(
+    store: &Index,
+    ord: usize,
+    hit_score: f64,
+    fl: &FieldList<'_>,
+    params: &Params,
+) -> Result<Value, Error> {
+    let Value::Object(map) = store.row(ord) else {
+        return Ok(store.row(ord).clone());
     };
     let row = store.schema.effective(map);
     let mut out = Map::new();
@@ -247,15 +306,101 @@ fn project(store: &Store, doc: &Value, fl: &FieldList<'_>) -> Value {
         };
         let explicit = fl.patterns.iter().any(|p| glob_match(p, name));
         if explicit || (fl.star && f.returned_in_star()) {
-            let value = match value {
-                Value::Array(_) => value.clone(),
-                single if f.multi => Value::Array(vec![single.clone()]),
-                single => single.clone(),
-            };
-            out.insert(name.clone(), value);
+            out.insert(name.clone(), normalize(store, name, value));
         }
     }
-    Value::Object(out)
+    for item in &fl.items {
+        if *item == "score" {
+            out.insert("score".into(), Value::from(hit_score));
+        } else if *item == "[child]" {
+            out.insert("_childDocuments_".into(), children(store, &row));
+        } else if let Some(alias) = item.strip_suffix(":[subquery]") {
+            let alias = alias.split(':').next().unwrap_or(alias);
+            out.insert(alias.to_owned(), subquery(store, &row, alias, params)?);
+        } else if let Some((alias, src)) = item.split_once(':')
+            && !item.starts_with('[')
+            && let Some(value) = row.get(src)
+        {
+            out.insert(alias.to_owned(), normalize(store, src, value));
+        }
+    }
+    Ok(Value::Object(out))
+}
+
+fn normalize(store: &Index, name: &str, value: &Value) -> Value {
+    match value {
+        Value::Array(_) => value.clone(),
+        single if store.schema.get(name).is_some_and(|f| f.multi) => {
+            Value::Array(vec![single.clone()])
+        }
+        single => single.clone(),
+    }
+}
+
+/// `[child]`: the copyField-expanded rows whose `_root_` is this row's key (other than
+/// the row itself), in store order, without `_root_`.
+fn children(store: &Index, row: &Map<String, Value>) -> Value {
+    let uk = store.schema.unique_key.as_str();
+    let key = row.get(uk);
+    let kids = store
+        .docs
+        .iter()
+        .filter_map(|d| d.as_object())
+        .filter(|d| d.get("_root_") == key && d.get(uk) != key)
+        .map(|d| {
+            let mut kid = store.schema.effective(d).into_owned();
+            kid.remove("_root_");
+            Value::Object(kid)
+        })
+        .collect();
+    Value::Array(kids)
+}
+
+/// `alias:[subquery]`, as Python's `subquery`: the request parameters prefixed with
+/// `alias.` (prefix removed) plus `row.<field>` for every field of the parent row, run
+/// as a nested `/select` (default `rows` 10, `fl` `*` split on commas only).
+fn subquery(
+    store: &Index,
+    parent: &Map<String, Value>,
+    alias: &str,
+    params: &Params,
+) -> Result<Value, Error> {
+    let prefix = format!("{alias}.");
+    let mut pairs: Vec<(String, String)> = params
+        .pairs()
+        .iter()
+        .filter_map(|(k, v)| k.strip_prefix(&prefix).map(|k| (k.to_owned(), v.clone())))
+        .collect();
+    for (name, value) in parent {
+        if matches!(name.as_str(), "_root_" | "_nest_path_") {
+            continue;
+        }
+        let text = match value {
+            Value::Array(items) => items.iter().map(py_str).collect::<Vec<_>>().join(","),
+            Value::Bool(b) => b.to_string(),
+            other => py_str(other),
+        };
+        pairs.push((format!("row.{name}"), text));
+    }
+    let sub = Params::new(pairs);
+    let sel = run(store, &sub, false, &[','])?;
+    Ok(serde_json::json!({
+        "numFound": sel.num_found,
+        "start": sel.start,
+        "numFoundExact": true,
+        "docs": sel.docs,
+    }))
+}
+
+/// Python's `str()` of a JSON value: `True`/`False`, `None`, numbers and strings as is.
+fn py_str(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Bool(true) => "True".into(),
+        Value::Bool(false) => "False".into(),
+        Value::Null => "None".into(),
+        other => other.to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -272,28 +417,33 @@ mod tests {
         )
     }
 
-    fn store() -> Store {
+    fn store() -> Index {
         let conf = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/conf");
         let schema = crate::schema::Schema::load(&conf).expect("test schema");
-        Store::from_docs(schema, vec![
+        let docs = vec![
             json!({"key": "/works/OL1W", "_root_": "/works/OL1W", "type": "work", "title": "Alice in Wonderland", "author_name": ["Lewis Carroll"], "edition_count": 5, "ebook_access": "borrowable", "ia": ["alice00"], "first_publish_year": 1865}),
             json!({"key": "/works/OL2W", "_root_": "/works/OL2W", "type": "work", "title": "Through the Looking-Glass", "author_name": ["Lewis Carroll"], "edition_count": 9, "ebook_access": "no_ebook", "first_publish_year": 1871}),
             json!({"key": "/works/OL3W", "_root_": "/works/OL3W", "type": "work", "title": "Tom Sawyer", "author_name": ["Mark Twain"], "edition_count": 20, "ebook_access": "public", "ia": ["tom00"], "first_publish_year": 1876}),
             json!({"key": "/authors/OL9A", "type": "author", "name": "Lewis Carroll", "rank_i": 4, "subject": "Logic"}),
             json!({"key": "/books/OL1M", "_root_": "/works/OL1W", "type": "edition", "title": "Alice", "language": ["eng"], "publisher": ["Penguin"], "ebook_access": "borrowable"}),
             json!({"key": "/books/OL2M", "_root_": "/works/OL3W", "type": "edition", "title": "Tom Sawyer", "language": ["fre"], "publisher": ["Gallimard"], "ebook_access": "public"}),
-        ])
+        ];
+        Index::from_docs(
+            std::sync::Arc::new(schema),
+            docs.into_iter().map(std::sync::Arc::new).collect(),
+            0,
+        )
         .expect("index builds")
     }
 
-    fn count(store: &Store, pairs: &[(&str, &str)]) -> usize {
+    fn count(store: &Index, pairs: &[(&str, &str)]) -> usize {
         match select(store, &params(pairs)) {
             Ok(sel) => sel.num_found,
             Err(e) => panic!("{pairs:?}: {e}"),
         }
     }
 
-    fn keys(store: &Store, pairs: &[(&str, &str)]) -> Vec<String> {
+    fn keys(store: &Index, pairs: &[(&str, &str)]) -> Vec<String> {
         let sel = select(store, &params(pairs)).expect("select");
         sel.docs
             .iter()
