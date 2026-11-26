@@ -8,6 +8,7 @@
 pub mod analysis;
 pub mod error;
 pub mod function;
+pub mod md5;
 pub mod porter;
 pub mod query;
 pub mod schema;
