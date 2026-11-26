@@ -1,0 +1,32 @@
+[package]
+name = "minisolr-rs"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Throwaway Rust prototype of minisolr /select, built to measure memory and analyzer parity"
+license = "MIT"
+publish = false
+
+[dependencies]
+tantivy = { version = "0.27", default-features = false }
+serde_json = { version = "1", default-features = false, features = ["std"] }
+unicode-normalization = "0.1"
+tiny_http = "0.12"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+indexing_slicing = "warn"
+
+[profile.release]
+opt-level = 2
+lto = false
+codegen-units = 16
+debug = false
+strip = true
+panic = "abort"

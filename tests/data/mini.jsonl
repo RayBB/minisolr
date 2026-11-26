@@ -1,0 +1,5 @@
+{"key": "/works/OL1W", "type": "work", "title": "The Odyssey", "alternative_title": ["The Odyssey"], "author_name": ["Homer"], "author_key": ["OL1A"], "subject": ["Greek mythology"], "edition_count": 12, "first_publish_year": -800}
+{"key": "/works/OL2W", "type": "work", "title": "Alice's Adventures in Wonderland", "alternative_title": ["Alice's Adventures in Wonderland"], "author_name": ["Lewis Carroll"], "author_key": ["OL2A"], "has_fulltext": true, "edition_count": 40, "first_publish_year": 1865}
+{"key": "/works/OL3W", "type": "work", "title": "Through the Looking-Glass", "alternative_title": ["Through the Looking-Glass"], "author_name": ["Lewis Carroll"], "author_key": ["OL2A"], "has_fulltext": false, "edition_count": 9, "first_publish_year": 1871}
+{"key": "/authors/OL2A", "type": "author", "name": "Lewis Carroll", "alternate_names": ["Charles Lutwidge Dodgson"], "work_count": 2}
+{"key": "/works/OL4W", "type": "work", "title": "Gabriel García Márquez: Cien años de soledad", "alternative_title": ["Cien años de soledad"], "author_name": ["Gabriel García Márquez"], "author_key": ["OL4A"], "edition_count": 3, "first_publish_year": 1967}
