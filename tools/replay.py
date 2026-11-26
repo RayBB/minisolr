@@ -12,6 +12,12 @@ Python minisolr or Solr itself) and at minisolr's fixtures directory:
 Requests are chosen as in minisolr's e2e/harness.py `select_requests`: top-level /select with an
 `ol.label` param and no `{params...}` keys, de-duplicated by their params; `timeAllowed` is dropped.
 A request is answerable when the response has a `response` and no `warning` in `responseHeader`.
+For selects that return `editions:[subquery]`, the first edition of each of the top 10 is compared
+too (harness `edition_firsts`). The captured /get requests are replayed and compared as the
+harness's `summarize_get` does (list values unordered: Open Library builds some from sets).
+
+With --probes, every probe of e2e/probes.py runs in order, including the update lifecycle (it adds
+and then deletes /works/OL999999W, so the server ends as it started) and the get/export probes.
 """
 
 from __future__ import annotations
@@ -34,9 +40,12 @@ def select_requests(reqs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return list({json.dumps(r["params"]): r for r in keep}.values())
 
 
-def post(base: str, pairs: list[tuple[str, str]]) -> dict[str, Any]:
-    data = urllib.parse.urlencode(pairs).encode()
-    req = urllib.request.Request(base.rstrip("/") + "/select", data=data)
+def post(base: str, pairs: list[tuple[str, str]], handler: str = "/select", body: Any = None) -> dict[str, Any]:
+    if body is None:
+        req = urllib.request.Request(base.rstrip("/") + handler, data=urllib.parse.urlencode(pairs).encode())
+    else:
+        url = base.rstrip("/") + handler + ("?" + urllib.parse.urlencode(pairs) if pairs else "")
+        req = urllib.request.Request(url, data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=60) as resp:
             return json.loads(resp.read() or b"{}")
@@ -68,7 +77,7 @@ def replay(base: str, fixtures: Path, verbose: bool, subset_out: Path | None) ->
     reqs = json.loads((fixtures / "requests.json").read_text())
     gold = json.loads((fixtures / "golden.json").read_text())["select"]
     sels = [r for r in select_requests(reqs) if json.dumps(r["params"]) in gold]
-    answerable = nf_equal = set_equal = overlap = gold_keys = 0
+    answerable = nf_equal = set_equal = overlap = gold_keys = ed_n = ed_equal = 0
     reasons: Counter[str] = Counter()
     misses: list[str] = []
     unanswered: list[str] = []
@@ -93,6 +102,9 @@ def replay(base: str, fixtures: Path, verbose: bool, subset_out: Path | None) ->
         set_equal += set(keys) == set(g["keys"])
         overlap += common
         gold_keys += len(g["keys"])
+        if "edition_firsts" in g:
+            ed_n += 1
+            ed_equal += edition_firsts(j) == g["edition_firsts"]
         if not n_ok or set(keys) != set(g["keys"]):
             misses.append(f"{label} fq={d.get('fq')!r}: numFound {resp.get('numFound')} vs {g['numFound']}, top-10 overlap {common}/{len(g['keys'])}")
     pct = 100.0 * overlap / gold_keys if gold_keys else 0.0
@@ -101,6 +113,7 @@ def replay(base: str, fixtures: Path, verbose: bool, subset_out: Path | None) ->
     print(f"numFound equal: {nf_equal}/{answerable}")
     print(f"top-10 set equal: {set_equal}/{answerable}")
     print(f"top-10 key overlap: {overlap}/{gold_keys} ({pct:.2f}%)")
+    print(f"editions:[subquery] first edition of the top 10 equal: {ed_equal}/{ed_n}")
     print(f"unanswered: {len(sels) - answerable}")
     for reason, n in reasons.most_common():
         print(f"  {n:4d}  {reason}")
@@ -111,6 +124,42 @@ def replay(base: str, fixtures: Path, verbose: bool, subset_out: Path | None) ->
             print("  UNANSWERED", u)
     if subset_out:
         subset_out.write_text(json.dumps(subset))
+    replay_get(base, reqs, json.loads((fixtures / "golden.json").read_text())["get"], verbose)
+
+
+def edition_firsts(j: dict[str, Any]) -> list[Any]:
+    """harness.py `edition_keys`: the first `editions:[subquery]` key of each of the top 10."""
+    out: list[Any] = []
+    for d in j.get("response", {}).get("docs", [])[:10]:
+        eds = d["editions"].get("docs") if isinstance(d.get("editions"), dict) else None
+        out.append(eds[0].get("key") if eds else None)
+    return out
+
+
+def unordered(v: Any) -> Any:
+    return sorted(v, key=repr) if isinstance(v, list) else v
+
+
+def summarize_get(j: dict[str, Any]) -> dict[str, Any]:
+    """harness.py `summarize_get`."""
+    d = j.get("doc")
+    return {"doc": {k: unordered(v) for k, v in d.items()} if isinstance(d, dict) else d}
+
+
+def replay_get(base: str, reqs: list[dict[str, Any]], gold: dict[str, Any], verbose: bool) -> None:
+    gets = list({json.dumps(r["params"]): r for r in reqs if r["path"] == "/get"}.values())
+    total = equal = 0
+    for r in gets:
+        g = gold.get(json.dumps(r["params"]))
+        if g is None:
+            continue
+        total += 1
+        j = post(base, [(k, v) for k, v in r["params"] if k not in DROP_PARAMS], "/get")
+        if "error" not in j and summarize_get(j) == summarize_get(g):
+            equal += 1
+        elif verbose:
+            print("  GET MISS", dict(r["params"]).get("id") or dict(r["params"]).get("ids"), json.dumps(j)[:300])
+    print(f"/get equal: {equal}/{total}")
 
 
 def probe_essence(p: dict[str, Any], j: dict[str, Any]) -> dict[str, Any]:
@@ -127,22 +176,60 @@ def probe_essence(p: dict[str, Any], j: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def probes(base: str, fixtures: Path, verbose: bool) -> None:
-    """Select-kind probes against probes_golden.json, with the hard checks of e2e/probes.py `compare`.
+def probe_norm(p: dict[str, Any], j: dict[str, Any]) -> dict[str, Any]:
+    """e2e/probes.py `norm` for the update, get and export kinds."""
+    if "error" in j:
+        return {"error": str(j["error"].get("msg"))[:160]}
+    kind = p.get("kind")
+    if kind == "update":
+        return {"status": j.get("responseHeader", {}).get("status")}
+    if kind == "get":
+        out = {"doc": j.get("doc")}
+        if "response" in j:
+            out["docs"] = j["response"]["docs"]
+        return out
+    resp = j.get("response", {})
+    docs = resp.get("docs", [])
+    return {"numFound": resp.get("numFound"), "keys": [d.get("key") for d in docs][:10], "docs": [{k: v for k, v in d.items() if k != "score"} for d in docs[:10]]}
 
-    The golden answers assume the probe setup (a list document and trending-score updates) and the
-    lifecycle updates, which a read-only server cannot reproduce, so a few probes differ for that reason.
+
+def probes(base: str, fixtures: Path, verbose: bool) -> None:
+    """Every probe in e2e/probes.py order, against probes_golden.json, with the hard checks of its `compare`.
+
+    Select probes are counted as before (answerable: a `response` and no `warning`). The update probes
+    run for real, so the lifecycle selects after them see the added, updated and deleted document; they
+    and the get and export probes are compared on the essence `norm` keeps. The golden answers also
+    assume the probe setup (a list document and trending-score updates), which this tool does not
+    reproduce, so a few probes differ for that reason.
     """
     sys.path.insert(0, str(fixtures.parent / "e2e"))
     import probes as probe_defs  # minisolr's e2e/probes.py: probe definitions only, nothing runs on import
 
     gold = json.loads((fixtures / "probes_golden.json").read_text())
     ok = answered = total = 0
+    other_ok = other_total = 0
     reasons: Counter[str] = Counter()
     fails: list[str] = []
+    handlers = {"update": "/update", "get": "/get", "export": "/export"}
     for p in probe_defs.PROBES:
         g = gold.get(p["name"])
-        if p.get("kind", "select") != "select" or g is None or "error" in g:
+        kind = p.get("kind", "select")
+        if kind in handlers:
+            if kind == "update":
+                j = post(base, [("commit", "true")] if p.get("commit") else [], "/update", body=p["body"])
+            else:
+                j = post(base, [(k, str(v)) for k, v in p["params"].items()], handlers[kind])
+            if g is None or "error" in g:
+                continue
+            other_total += 1
+            r = probe_norm(p, j)
+            bad = [k for k in ("status", "doc", "docs", "numFound") if k in g and g[k] != r.get(k)]
+            if bad:
+                fails.append(f"{p['name']}: {', '.join(bad)} differ: {json.dumps(r)[:200]}")
+            else:
+                other_ok += 1
+            continue
+        if kind != "select" or g is None or "error" in g:
             continue
         total += 1
         pairs = [(k, str(x)) for k, v in p["params"].items() for x in (v if isinstance(v, list) else [v])]
@@ -170,6 +257,7 @@ def probes(base: str, fixtures: Path, verbose: bool) -> None:
     print(f"select probes with golden: {total}; answerable: {answered}; match: {ok}/{answered}")
     for reason, n in reasons.most_common():
         print(f"  {n:4d}  {reason}")
+    print(f"update/get/export probes with golden: {other_total}; match: {other_ok}/{other_total}")
     for f in fails if verbose else fails[:10]:
         print("  PROBE FAIL", f)
 
