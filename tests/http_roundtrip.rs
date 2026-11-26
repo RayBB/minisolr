@@ -247,3 +247,142 @@ fn function_boosts_and_sorts() -> TestResult {
     assert_eq!(keys(&enums), ["/books/OL3M", "/books/OL1M", "/books/OL2M"]);
     Ok(())
 }
+
+#[test]
+fn update_lifecycle_and_restart_from_the_data_directory() -> TestResult {
+    let dir = std::env::temp_dir().join(format!("minisolr-rs-http-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir)?;
+    let addr = start(&dir)?;
+    let update = |body: &str, query: &str| {
+        request(
+            &addr,
+            &format!(
+                "POST /solr/openlibrary/update{query} HTTP/1.1\r\nContent-Type: application/json"
+            ),
+            body,
+        )
+    };
+    let select = |pairs: &[(&str, &str)]| {
+        request(
+            &addr,
+            "POST /solr/openlibrary/select HTTP/1.1\r\nContent-Type: application/x-www-form-urlencoded",
+            &form(pairs),
+        )
+    };
+    let get = |q: &str| {
+        request(
+            &addr,
+            &format!("GET /solr/openlibrary/get?{q} HTTP/1.1"),
+            "",
+        )
+    };
+
+    // Open Library's shape: repeated `add` commands, nested editions, then a commit.
+    let body = r#"{"add": {"doc": {"key": "/works/OL1W", "type": "work", "title": "Alice in Wonderland",
+        "author_name": ["Lewis Carroll"], "edition_count": 2,
+        "editions": [{"key": "/books/OL1M", "type": "edition", "title": "Alice", "language": ["eng"]},
+                     {"key": "/books/OL2M", "type": "edition", "title": "Alice {braces} \"quoted\"", "language": ["fre"]}]}},
+      "add": {"doc": {"key": "/works/OL2W", "type": "work", "title": "Tom Sawyer", "author_name": ["Mark Twain"], "edition_count": 1}},
+      "add": {"doc": {"key": "/authors/OL1A", "type": "author", "name": "Lewis Carroll"}},
+      "commit": {}}"#;
+    let added = update(body, "?update.partial.requireInPlace=true")?;
+    assert_eq!(added["responseHeader"]["status"], 0, "{added}");
+    assert_eq!(select(&[("q", "*:*")])?["response"]["numFound"], 5);
+    let works = select(&[
+        ("q", "author_name:carroll"),
+        ("fq", "type:work"),
+        ("fl", "key,score,t:title,editions:[subquery]"),
+        ("editions.q", "{!terms f=_root_ v=$row.key}"),
+        ("editions.fq", "language:fre"),
+        ("editions.fl", "key"),
+    ])?;
+    assert_eq!(keys(&works), ["/works/OL1W"]);
+    let doc = &works["response"]["docs"][0];
+    assert_eq!(doc["t"], "Alice in Wonderland");
+    assert!(doc["score"].as_f64().is_some_and(|s| s > 0.0));
+    assert_eq!(doc["editions"]["numFound"], 1);
+    assert_eq!(
+        doc["editions"]["docs"],
+        serde_json::json!([{"key": "/books/OL2M"}])
+    );
+    let child = select(&[("q", "key:\"/works/OL1W\""), ("fl", "key,[child]")])?;
+    let kids = &child["response"]["docs"][0]["_childDocuments_"];
+    assert_eq!(kids.as_array().map(Vec::len), Some(2));
+    assert_eq!(kids[1]["_nest_path_"], "/editions#1");
+
+    let atomic = update(
+        r#"[{"key": "/works/OL1W", "edition_count": {"inc": 4}, "title": {"set": "Alice II"}, "subject": {"add": "Fantasy"}}]"#,
+        "?commit=true",
+    )?;
+    assert_eq!(atomic["responseHeader"]["status"], 0);
+    let got = get("id=/works/OL1W&fl=key,title,edition_count,subject")?;
+    assert_eq!(
+        got["doc"],
+        serde_json::json!({"key": "/works/OL1W", "title": "Alice II", "edition_count": 6, "subject": ["Fantasy"]})
+    );
+    assert_eq!(
+        select(&[("q", "title:alice"), ("fq", "type:work")])?["response"]["numFound"],
+        1
+    );
+    let both = get("ids=/works/OL2W,/works/NOPE,/works/OL1W&fl=key")?;
+    assert_eq!(keys(&both), ["/works/OL2W", "/works/OL1W"]);
+    assert_eq!(get("id=/works/NOPE")?["doc"], Value::Null);
+
+    let missing = update(
+        r#"{"add": {"doc": {"key": "/works/NOPE", "title": {"set": "x"}}}}"#,
+        "",
+    )?;
+    assert_eq!(missing["responseHeader"]["status"], 400);
+    assert_eq!(
+        missing["error"]["msg"],
+        "Document not found for update.  id=/works/NOPE"
+    );
+    let tolerant = update(
+        r#"{"add": {"doc": {"title": "no key"}}, "add": {"doc": {"key": "/works/OL3W", "type": "work"}}}"#,
+        "?update.chain=tolerant-chain",
+    )?;
+    assert_eq!(tolerant["responseHeader"]["status"], 0);
+    assert_eq!(
+        tolerant["responseHeader"]["errors"][0]["message"],
+        "Document is missing mandatory uniqueKey field: key"
+    );
+
+    let deleted = update(
+        r#"{"delete": ["/works/OL3W"], "delete": {"query": "key:\"/works/OL2W\""}, "commit": {}}"#,
+        "",
+    )?;
+    assert_eq!(deleted["responseHeader"]["status"], 0);
+    let export = request(
+        &addr,
+        "GET /solr/openlibrary/export?q=*:*&fl=key&sort=key%20asc HTTP/1.1",
+        "",
+    )?;
+    assert_eq!(
+        keys(&export),
+        ["/authors/OL1A", "/books/OL1M", "/books/OL2M", "/works/OL1W"]
+    );
+    let gone = update(r#"{"delete": {"id": "/works/OL1W"}}"#, "")?;
+    assert_eq!(gone["responseHeader"]["status"], 0);
+    assert_eq!(
+        select(&[("q", "*:*")])?["response"]["numFound"],
+        1,
+        "children go with their root"
+    );
+    let cores = request(&addr, "GET /solr/admin/cores?action=STATUS HTTP/1.1", "")?;
+    assert_eq!(cores["status"]["openlibrary"]["index"]["numDocs"], 1);
+
+    // A second server on the same directory sees what the first one saved.
+    let restarted = start(&dir)?;
+    let again = request(
+        &restarted,
+        "GET /solr/openlibrary/select?q=*:*&fl=key,name HTTP/1.1",
+        "",
+    )?;
+    assert_eq!(
+        again["response"]["docs"],
+        serde_json::json!([{"key": "/authors/OL1A", "name": "Lewis Carroll"}])
+    );
+    std::fs::remove_dir_all(&dir)?;
+    Ok(())
+}
