@@ -7,6 +7,7 @@
 
 pub mod analysis;
 pub mod error;
+pub mod function;
 pub mod porter;
 pub mod query;
 pub mod schema;
