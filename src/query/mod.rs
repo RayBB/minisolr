@@ -14,11 +14,18 @@
 //! page.
 //!
 //! `fl` takes names, globs, `score`, `alias:field`, `[child]` and `alias:[subquery]`, as
-//! Python minisolr's `project`. Not yet: facets, grouping, cursors.
+//! Python minisolr's `project`.
+//!
+//! Facets (`facet.field`, `facet.query`, the JSON Facet API) are in `facet`; the JSON
+//! Request API body is turned into parameters by [`json_request_params`]. `cursorMark`
+//! pages as Python does: `*` starts at 0, `o:<n>` at offset `n`, and `nextCursorMark`
+//! is `o:<start + returned>` (the cursor itself once a page comes back empty); no sort
+//! on the uniqueKey is required, as ties already break in index order. Not yet: grouping.
 
 pub mod ast;
 mod compile;
 mod edismax;
+mod facet;
 mod join;
 pub mod lexer;
 pub mod localparams;
@@ -91,6 +98,27 @@ pub struct Selection {
     pub start: usize,
     /// The returned documents, after `fl`.
     pub docs: Vec<Value>,
+    /// `nextCursorMark`, when the request has a `cursorMark`.
+    pub next_cursor: Option<String>,
+    /// `facet_counts`, when the request asks for classic facets.
+    pub facet_counts: Option<Value>,
+    /// `facets`, the JSON Facet API answer, for a JSON request with a `facet`.
+    pub facets: Option<Value>,
+}
+
+impl Selection {
+    /// An empty answer.
+    #[must_use]
+    pub fn empty() -> Self {
+        Self {
+            num_found: 0,
+            start: 0,
+            docs: Vec::new(),
+            next_cursor: None,
+            facet_counts: None,
+            facets: None,
+        }
+    }
 }
 
 fn unsupported<T>(what: impl Into<String>) -> Result<T, Error> {
@@ -103,7 +131,63 @@ fn unsupported<T>(what: impl Into<String>) -> Result<T, Error> {
 /// [`Error::Unsupported`] for features outside the supported subset; other variants for
 /// index failures.
 pub fn select(store: &Index, params: &Params) -> Result<Selection, Error> {
-    run(store, params, false, FL_SEPARATORS)
+    execute(store, params, false, None)
+}
+
+/// Runs a JSON Request API request whose body became `params` (see
+/// [`json_request_params`]); `facet` is the body's `facet`, answered in
+/// [`Selection::facets`].
+///
+/// # Errors
+/// As [`select`], plus malformed JSON facets.
+pub fn select_json(
+    store: &Index,
+    params: &Params,
+    facet: Option<&Value>,
+) -> Result<Selection, Error> {
+    execute(store, params, false, facet)
+}
+
+/// The parameters of a JSON Request API body, as Python's `select_json`: the URL
+/// parameters, then each `params` entry (arrays repeat the name, values as Python's
+/// `str()`), `query` as `q` (`*:*` when it is not a string), each `filter` as `fq`,
+/// `limit` as `rows`, `offset` as `start`, `sort`, and `fields` as `fl` (an array is
+/// joined with commas).
+///
+/// # Errors
+/// A body that is not a JSON object.
+pub fn json_request_params(url: &[(String, String)], body: &Value) -> Result<Params, Error> {
+    let body = body
+        .as_object()
+        .ok_or_else(|| Error::Other("the JSON request body is not an object".into()))?;
+    let mut pairs = url.to_vec();
+    if let Some(Value::Object(params)) = body.get("params") {
+        for (k, v) in params {
+            pairs.extend(crate::index::values(v).map(|x| (k.clone(), py_str(x))));
+        }
+    }
+    if let Some(q) = body.get("query") {
+        pairs.push(("q".into(), q.as_str().unwrap_or("*:*").to_owned()));
+    }
+    if let Some(filter) = body.get("filter") {
+        pairs.extend(crate::index::values(filter).map(|f| ("fq".into(), py_str(f))));
+    }
+    for (src, dst) in [("limit", "rows"), ("offset", "start"), ("sort", "sort")] {
+        if let Some(v) = body.get(src) {
+            pairs.push((dst.into(), py_str(v)));
+        }
+    }
+    if let Some(fields) = body.get("fields") {
+        let fl = match fields {
+            Value::String(s) => s.clone(),
+            other => crate::index::values(other)
+                .map(py_str)
+                .collect::<Vec<_>>()
+                .join(","),
+        };
+        pairs.push(("fl".into(), fl));
+    }
+    Ok(Params::new(pairs))
 }
 
 /// Runs an `/export` request: a `/select` that returns every hit from `start` on, as
@@ -112,7 +196,7 @@ pub fn select(store: &Index, params: &Params) -> Result<Selection, Error> {
 /// # Errors
 /// As [`select`].
 pub fn export(store: &Index, params: &Params) -> Result<Selection, Error> {
-    run(store, params, true, FL_SEPARATORS)
+    execute(store, params, true, None)
 }
 
 /// The rows matching `q`, parsed as Python's update handler does for delete-by-query:
@@ -135,20 +219,111 @@ pub fn matching_rows(store: &Index, q: &str) -> Result<Vec<usize>, Error> {
 /// What separates `fl` items in a top-level request (subqueries split on commas only).
 const FL_SEPARATORS: &[char] = &[',', ' ', '\t', '\n', '\r'];
 
-fn run(store: &Index, params: &Params, export: bool, fl_seps: &[char]) -> Result<Selection, Error> {
+/// A top-level request: the search, then `cursorMark`, classic facets and JSON facets
+/// over every hit.
+fn execute(
+    store: &Index,
+    params: &Params,
+    export: bool,
+    json_facet: Option<&Value>,
+) -> Result<Selection, Error> {
+    if params.get("json.facet").is_some_and(|v| v != "false") {
+        return unsupported("parameter json.facet");
+    }
+    let cursor = params.get("cursorMark").filter(|c| !c.is_empty());
+    let start = match cursor {
+        None => number(params, "start", 0)?,
+        Some("*") => 0,
+        Some(c) => c
+            .split(':')
+            .nth(1)
+            .and_then(|n| n.trim().parse().ok())
+            .ok_or_else(|| Error::Other(format!("bad cursorMark: {c}")))?,
+    };
     let rows = if export {
         store.docs.len().max(1)
     } else {
         number(params, "rows", 10)?
     };
-    let start = number(params, "start", 0)?;
-    if matches!(params.get("facet"), Some("true" | "on")) || params.get("facet.field").is_some() {
-        return unsupported("facets");
-    }
-    for unsupported_param in ["group", "cursorMark", "json.facet"] {
-        if params.get(unsupported_param).is_some_and(|v| v != "false") {
-            return unsupported(format!("parameter {unsupported_param}"));
+    let facets_wanted = facet::wanted(params);
+    let found = search(
+        store,
+        params,
+        start,
+        rows,
+        facets_wanted || json_facet.is_some(),
+    )?;
+    let next_cursor = cursor.map(|c| {
+        if found.page.is_empty() {
+            c.to_owned()
+        } else {
+            format!("o:{}", start + found.page.len())
         }
+    });
+    let fl = FieldList::parse(params.get("fl").unwrap_or("*").trim(), FL_SEPARATORS);
+    let docs = project_page(store, found.page, &fl, params)?;
+    let facet_counts = if facets_wanted {
+        Some(facet::facet_counts(store, &found.all, params)?)
+    } else {
+        None
+    };
+    let facets = json_facet
+        .map(|spec| facet::json_facets(store, &found.all, spec))
+        .transpose()?;
+    Ok(Selection {
+        num_found: found.total,
+        start,
+        docs,
+        next_cursor,
+        facet_counts,
+        facets,
+    })
+}
+
+/// A nested request (`[subquery]`): the search and the page only, as Python's
+/// `subquery`, which ignores cursors and facets.
+fn run(store: &Index, params: &Params, fl_seps: &[char]) -> Result<Selection, Error> {
+    let start = number(params, "start", 0)?;
+    let rows = number(params, "rows", 10)?;
+    let found = search(store, params, start, rows, false)?;
+    let fl = FieldList::parse(params.get("fl").unwrap_or("*").trim(), fl_seps);
+    Ok(Selection {
+        num_found: found.total,
+        start,
+        docs: project_page(store, found.page, &fl, params)?,
+        ..Selection::empty()
+    })
+}
+
+fn project_page(
+    store: &Index,
+    page: Vec<sort::Hit>,
+    fl: &FieldList<'_>,
+    params: &Params,
+) -> Result<Vec<Value>, Error> {
+    page.into_iter()
+        .map(|(ord, score)| project(store, ord, score, fl, params))
+        .collect()
+}
+
+/// The hits of one search.
+struct Found {
+    total: usize,
+    /// The requested page, in order.
+    page: Vec<sort::Hit>,
+    /// The `ord` of every hit, when asked for (facets need the whole result set).
+    all: Vec<usize>,
+}
+
+fn search(
+    store: &Index,
+    params: &Params,
+    start: usize,
+    rows: usize,
+    want_all: bool,
+) -> Result<Found, Error> {
+    if params.get("group").is_some_and(|v| v != "false") {
+        return unsupported("parameter group");
     }
     let fqs: Vec<&str> = params.all("fq").collect();
     let mut compiler = Compiler::new(store, params);
@@ -169,7 +344,7 @@ fn run(store: &Index, params: &Params, export: bool, fl_seps: &[char]) -> Result
         .filter(|s| !s.is_empty())
         .map(|spec| sort::parse_sort(store, spec, params));
     let searcher = store.reader.searcher();
-    let (num_found, page) = if sort_keys.is_none() && rescore.is_empty() {
+    let (num_found, page, all) = if sort_keys.is_none() && rescore.is_empty() && !want_all {
         let (count, top) = if rows == 0 {
             (searcher.search(&*query, &Count)?, Vec::new())
         } else {
@@ -185,13 +360,13 @@ fn run(store: &Index, params: &Params, export: bool, fl_seps: &[char]) -> Result
             .into_iter()
             .map(|(score, addr)| Ok((ord_of(&searcher, addr)?, f64::from(score))))
             .collect::<Result<Vec<sort::Hit>, Error>>()?;
-        (count, page)
+        (count, page, Vec::new())
     } else {
         // A function or a sort can move any hit into the page, so every hit is scored.
-        let all = usize::try_from(searcher.num_docs())
+        let limit = usize::try_from(searcher.num_docs())
             .unwrap_or(usize::MAX)
             .max(1);
-        let top = searcher.search(&*query, &TopDocs::with_limit(all).order_by_score())?;
+        let top = searcher.search(&*query, &TopDocs::with_limit(limit).order_by_score())?;
         let mut hits = top
             .into_iter()
             .map(|(score, addr)| {
@@ -208,17 +383,21 @@ fn run(store: &Index, params: &Params, export: bool, fl_seps: &[char]) -> Result
             }),
         }
         let found = hits.len();
-        (found, hits.into_iter().skip(start).take(rows).collect())
+        let all = if want_all {
+            hits.iter().map(|h| h.0).collect()
+        } else {
+            Vec::new()
+        };
+        (
+            found,
+            hits.into_iter().skip(start).take(rows).collect(),
+            all,
+        )
     };
-    let fl = FieldList::parse(params.get("fl").unwrap_or("*").trim(), fl_seps);
-    let docs = page
-        .into_iter()
-        .map(|(ord, score)| project(store, ord, score, &fl, params))
-        .collect::<Result<_, _>>()?;
-    Ok(Selection {
-        num_found,
-        start,
-        docs,
+    Ok(Found {
+        total: num_found,
+        page,
+        all,
     })
 }
 
@@ -383,7 +562,7 @@ fn subquery(
         pairs.push((format!("row.{name}"), text));
     }
     let sub = Params::new(pairs);
-    let sel = run(store, &sub, false, &[','])?;
+    let sel = run(store, &sub, &[','])?;
     Ok(serde_json::json!({
         "numFound": sel.num_found,
         "start": sel.start,
@@ -753,8 +932,8 @@ mod tests {
             let err = select(&s, &params(&[("q", q)])).expect_err(q);
             assert!(matches!(err, Error::Unsupported(_)), "{q}: {err}");
         }
-        let facets = select(&s, &params(&[("q", "*:*"), ("facet.field", "type")]));
-        assert!(matches!(facets, Err(Error::Unsupported(_))));
+        let grouped = select(&s, &params(&[("q", "*:*"), ("group", "true")]));
+        assert!(matches!(grouped, Err(Error::Unsupported(_))));
     }
 
     #[test]

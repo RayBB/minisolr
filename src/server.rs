@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::Instant;
 
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use tiny_http::{Header, Method, Request, Response, Server};
 
 use crate::Error;
@@ -271,21 +271,35 @@ pub fn route(core: &Core, request: &HttpRequest<'_>) -> (u16, Value) {
             json!({"responseHeader": {"status": 0, "QTime": 0}, "status": "OK"}),
         ),
         "select" | "query" if request.post && request.json_body => {
-            let params = Params::new(request.query.clone());
-            with_index(core, |idx| {
-                select_response(idx, &params, Some("the JSON Request API"), query::select)
-            })
+            let parsed = serde_json::from_str::<Value>(request.body)
+                .map_err(Error::from)
+                .and_then(|body| Ok((query::json_request_params(&request.query, &body)?, body)));
+            match parsed {
+                Ok((params, body)) => {
+                    let facet = body.get("facet").filter(|f| !f.is_null());
+                    with_index(core, |idx| {
+                        select_response(&params, |p| query::select_json(idx, p, facet))
+                    })
+                }
+                Err(e) => {
+                    eprintln!("error: JSON request: {e}");
+                    (
+                        500,
+                        json!({"responseHeader": {"status": 500}, "error": {"msg": e.to_string(), "code": 500}}),
+                    )
+                }
+            }
         }
         "select" | "query" => {
             let params = request.form_params();
             with_index(core, |idx| {
-                select_response(idx, &params, None, query::select)
+                select_response(&params, |p| query::select(idx, p))
             })
         }
         "export" => {
             let params = request.form_params();
             with_index(core, |idx| {
-                select_response(idx, &params, None, query::export)
+                select_response(&params, |p| query::export(idx, p))
             })
         }
         "get" => {
@@ -331,46 +345,44 @@ fn with_index(core: &Core, f: impl FnOnce(&Index) -> (u16, Value)) -> (u16, Valu
     }
 }
 
-/// A Solr-shaped `/select` (or `/export`) response; an unsupported request (or one
-/// naming an `unsupported` feature) becomes an empty result with a `warning` in the
-/// header.
-#[must_use]
+/// A Solr-shaped `/select` (or `/export`) response from `run`; an unsupported request
+/// becomes an empty result with a `warning` in the header. `nextCursorMark`,
+/// `facet_counts` and `facets` are added when the selection has them.
 pub fn select_response(
-    index: &Index,
     params: &Params,
-    unsupported: Option<&str>,
-    run: fn(&Index, &Params) -> Result<Selection, Error>,
+    run: impl FnOnce(&Params) -> Result<Selection, Error>,
 ) -> (u16, Value) {
     let started = Instant::now();
     let mut warning = None;
-    let result = match unsupported {
-        Some(what) => Err(Error::Unsupported(what.to_owned())),
-        None => run(index, params),
-    };
-    let selection = result.unwrap_or_else(|e| {
+    let selection = run(params).unwrap_or_else(|e| {
         eprintln!(
             "warning: UNSUPPORTED (ignored): {e}; q={:?}",
             params.get("q").unwrap_or_default()
         );
         warning = Some(e.to_string());
-        Selection {
-            num_found: 0,
-            start: 0,
-            docs: Vec::new(),
-        }
+        Selection::empty()
     });
     let mut header =
         json!({"status": 0, "QTime": started.elapsed().as_millis(), "params": params.to_json()});
     if let (Some(w), Some(map)) = (warning, header.as_object_mut()) {
         map.insert("warning".into(), Value::String(w));
     }
-    (
-        200,
-        json!({
-            "responseHeader": header,
-            "response": {"numFound": selection.num_found, "start": selection.start, "numFoundExact": true, "docs": selection.docs},
-        }),
-    )
+    let mut out = Map::new();
+    out.insert("responseHeader".into(), header);
+    out.insert(
+        "response".into(),
+        json!({"numFound": selection.num_found, "start": selection.start, "numFoundExact": true, "docs": selection.docs}),
+    );
+    if let Some(c) = selection.next_cursor {
+        out.insert("nextCursorMark".into(), Value::String(c));
+    }
+    if let Some(fc) = selection.facet_counts {
+        out.insert("facet_counts".into(), fc);
+    }
+    if let Some(f) = selection.facets {
+        out.insert("facets".into(), f);
+    }
+    (200, Value::Object(out))
 }
 
 /// `/get`, as Python's `get`: `id` (repeatable) and `ids` (comma-separated); `fl` is
