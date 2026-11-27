@@ -1,6 +1,6 @@
 # minisolr-rs
 
-A Rust port of [minisolr](../minisolr), the small Solr stand-in for Open Library development. It began as a prototype of `/select` to answer two questions: how much RAM does a Rust + Tantivy version really use, and can the Solr analyzer chains be reproduced token for token. It is now being ported step by step; [PORTING.md](PORTING.md) tracks the steps.
+A Rust port of [minisolr](../minisolr), the small Solr stand-in for Open Library development. It began as a prototype of `/select` to answer two questions: how much RAM does a Rust + Tantivy version really use, and can the Solr analyzer chains be reproduced token for token. The port is complete: it is a drop-in replacement for Python minisolr in Open Library's dev stack (`make reindex-solr`, the site, the `solr-updater` daemon), at about a tenth of its memory in Docker. [PORTING.md](PORTING.md) records the steps and the measurements.
 
 ## Run
 
@@ -13,7 +13,27 @@ curl -X POST 'localhost:8983/solr/openlibrary/update?commit=true' -H 'Content-Ty
 cargo test --release
 ```
 
-The first argument is a Solr conf directory with `managed-schema.xml` (and optionally `enumsConfig.xml`). The second is the data directory (created if missing): the store is loaded from `<dir>/docs.jsonl` and saved there after every update request that changes something, in the same format as Python minisolr, so either server can open the other's directory. Given a `.jsonl` file instead, the server loads it and keeps updates in memory only.
+The first argument is a Solr conf directory with `managed-schema.xml` (and optionally `enumsConfig.xml`). The second is the data directory (created if missing): the store is loaded from `<dir>/docs.jsonl` and saved there after every update request that changes something, in the same format as Python minisolr, so either server can open the other's directory. Given a `.jsonl` file instead, the server loads it and keeps updates in memory only. `minisolr-rs ping [addr]` exits 0 when the server at `addr` (default `127.0.0.1:8983`) answers `/solr/openlibrary/admin/ping`; the image uses it as its healthcheck.
+
+## Docker and Open Library's dev stack
+
+The `Dockerfile` builds a static musl binary in `rust:1-alpine` (two compile jobs, dependencies in their own cached layer) and copies it into a `scratch` image of about 8 MB. The container reads the schema from `/conf`, keeps its documents in `/data/docs.jsonl` and listens on port 8983.
+
+`compose.minisolr-rs.yaml` replaces Open Library's `solr` service with it, as Python minisolr's `compose.minisolr.yaml` does. In the Open Library checkout, add two lines to `.env`:
+
+```bash
+MINISOLR_RS_DIR=/path/to/minisolr-rs
+COMPOSE_FILE=compose.yaml:compose.override.yaml:/path/to/minisolr-rs/compose.minisolr-rs.yaml
+```
+
+Then `docker compose up -d` and `docker compose run --rm home make reindex-solr` as usual. To switch back to Python minisolr, point `COMPOSE_FILE` at `compose.minisolr.yaml` (with `MINISOLR_DIR`) instead; to go back to real Solr, remove both lines. The engines use separate volumes (`minisolr-rs-data`, `minisolr-data`, `solr-data`), so reindex after switching. The service runs with `init: true` so stops are immediate; every update request is written to disk (fsync, then rename) before it is answered, so a stop or restart never loses committed documents.
+
+Python minisolr's end-to-end harness runs the Rust server too:
+
+```bash
+cd ../minisolr && OL_DIR=/path/to/openlibrary MINISOLR_COMPOSE_FILE=$PWD/../minisolr-rs/compose.minisolr-rs.yaml \
+  MINISOLR_DIR=$PWD/../minisolr-rs python3 e2e/harness.py all-minisolr --down
+```
 
 ## Tools
 
@@ -86,6 +106,20 @@ An undefined field, a bare term with no default field, a range on a text field, 
 ## Analyzers
 
 `src/analysis.rs` builds every chain from the schema's `<analyzer>` elements, as Python's `analysis.py`: the `whitespace` (Python's `str.split()`) and `keyword` tokenizers, and the simplified standard tokenizer for any other name; the filters `lowercase`, `stop` (the `words` file, `ignoreCase`), `icuFolding` (NFKD, drop nonspacing marks, case fold, a few extra letters, NFC), `wordDelimiterGraph` (`generateWordParts`, `generateNumberParts`, `catenateWords`, `catenateNumbers`, the `types` file; parts take successive positions, catenations stack on the first, `'s` dropped), `porterStem` (`src/porter.rs`, the original Porter that Solr and Python use; `rust-stemmers` has only Porter2), `snowballPorter` (`src/snowball.rs`, Snowball English for every language, as Python), `englishPossessive`, `englishMinimalStem`, `keywordMarker` (`protwords.txt`), `synonymGraph` and `removeDuplicates`. Word lists are read from the files the filters name (a missing file is an empty list). Positions hold alternatives: queries OR the alternatives of a position, and a phrase over positions with alternatives is the OR of the first 8 combinations, as Python. Synonyms follow Python's approximation: rules with a multi-word term are ignored, `a => b` replaces the token, groups stack the other terms on its position (`expand=true`) or replace it with the first (`expand=false`). Components Python does not implement (language stemmers and normalizers, CJK bigrams, phonetic, payloads, the Japanese, Korean and path tokenizers) are skipped, as in Python, and listed in one warning line at startup naming each field type. Character categories, case folding and Python's whitespace come from tables generated from Python's `unicodedata` (`src/unicode/`, Unicode 16.0), so spacing marks (Mc) are kept by folding as in Python.
+
+## Measurements in Docker (Open Library's dev stack, OrbStack on an Apple Silicon Mac)
+
+Python minisolr's `e2e/harness.py all-minisolr --down` with this compose override, two complete runs, every checklist item PASS in both: `make reindex-solr` 446 documents (35 works, 68 editions, 34 authors through the JSON Request/Facet API, 309 subjects), site smoke test 86/86, replay `numFound` 267/267, top-10 overlap 98.76%, facets 6/6, `/get` 41/41, the same after `docker compose restart solr`, probes 66/66 against real Solr (the same 10 soft notes as Python), and the real `solr-updater` daemon (an edited work and a new list searchable after 9 s, a deleted list gone).
+
+| | minisolr-rs | Python minisolr |
+|---|---|---|
+| Container memory idle after restart (`docker stats`) | 3.5-3.6 MiB | 38-41 MiB |
+| after 1,335 replayed selects | 4.7-4.9 MiB | 42-43 MiB |
+| latency p50 / p95 / mean (harness, host to container) | 2.6-2.7 / 7.5-8.0 / 3.4-3.5 ms | 4.4-5.2 / 23-32 ms |
+| image | 7.67 MB (`scratch` + 7.6 MB static binary) | 126 MB |
+| restart until ping answers | 0.6 s | |
+
+The idle number is the store alone (the index is built by the first search). First image build 3 min 33 s (45 s pulling `rust:1-alpine`, 2 min 24 s for the dependencies with two jobs, 15 s for the crate); rebuilds after a source change reuse the dependency layer. The build ran on a machine with 16 GB of RAM and 9-10 GB of swap in use without trouble.
 
 ## Measurements (Apple Silicon Mac, host, no Docker, machine under swap pressure)
 

@@ -1,6 +1,6 @@
 # Porting minisolr to Rust: progress and plan
 
-Status: **prototype done; steps 1 (schema), 2 (query parser, edismax), 3 (function queries, boost), 4 (sorting and `cursorMark`), 5 (facets, JSON Request and Facet APIs), 6 (updates and persistence), 7 (remaining analysis) and 8 (highlighting and spellcheck) done: the behaviour is complete. Left: step 9, Docker packaging and the end-to-end run in Open Library's stack. The go/no-go checkpoint is [below](#checkpoint-after-step-3).** This file tracks how far the Rust version is from replacing the Python one in [minisolr](../minisolr), what the prototype showed, and what to do next. Numbers marked *(est.)* are estimates, not measurements.
+Status: **COMPLETE.** All nine steps are done. The Rust server replaces Python minisolr in Open Library's dev stack: Python minisolr's end-to-end harness passes every item with it (see [Final result](#final-result-step-9)), at about a tenth of Python's memory in Docker and a 7.67 MB image.
 
 ## Why we are doing this
 
@@ -96,9 +96,35 @@ Each step has a measurable gate: the language-independent fixtures in `../miniso
    - Replay: 267/267 answerable, `numFound` 267/267, overlap 717/726 = 98.76%, facets 6/6, `/get` 41/41. Round trip (now also comparing `highlighting` and `spellcheck`): reindex through `/update` gives the same rows (parsed, in order), 267/267 selects, 41/41 gets and 447/447 exported rows identical, and the same after a restart on the persisted directory, whose replay numbers are unchanged.
    - Memory and latency, all 267 requests, 1,300 queries, 5 fresh servers (9.0 of 10 GB swap in use): RSS 24.7-40.6 MiB, `footprint` 11-13 MiB, p50 1.62-1.76 ms, p95 4.7-5.6 ms (step 5: 26.8-42.0 MiB, 11-14 MiB, 1.53-1.65 ms, 3.9-5.7 ms; the p50 rise is the highlighting and spellcheck work on 211 requests). Binary 4.6 MiB stripped.
    - `src/` is 12,013 lines with tests, doc comments and the 651-line generated table; 7,455 non-blank, non-comment lines outside tests, 6,809 without the table (step 5: 5,017). Gates: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` (pedantic; new allows: `struct_excessive_bools` on the word delimiter's four flags, `unreadable_literal` on the generated table), `cargo test --release`: 121 unit tests, 9 HTTP tests (new: every route Python serves with its methods; highlighting, spellcheck and ignored features over HTTP).
-9. **Packaging.** Static musl build, scratch or Alpine image, compose override that selects the Rust image, an `--engine` switch in the e2e harness. *Gate: `all-minisolr` passes with the Rust server: smoke 86/86, replay 267/267, probes 66/66, `solr-updater` daemon, restart persistence.* About 1-2 days *(est.)*.
+9. [x] **Packaging.** Static musl build, scratch image, compose override, an engine switch in the e2e harness. *Gate: `all-minisolr` passes with the Rust server.*
+   **Done** (`Dockerfile`, `.dockerignore`, `compose.minisolr-rs.yaml`, `src/ping.rs`; Python minisolr's harness gained `MINISOLR_COMPOSE_FILE` and `MINISOLR_DIR`). The image builds a static binary in `rust:1-alpine` and copies it into `scratch`; `minisolr-rs ping` is the healthcheck since the image has no shell. The service runs with `init: true`: without an init, PID 1 ignores SIGTERM and `docker stop` waits 10 s; with docker-init it stops in under 0.2 s and a restart answers pings after 0.6 s. No signal handler was needed: every update request is saved (fsync, then rename) under the store lock before it is answered, so a stop never loses committed documents, which the harness's restart and persistence compare proves. The real clients (Open Library's httpx and aiohttp updaters, `requests` in the web app, the JSON Request API for authors) needed no server change: the first end-to-end run passed, and the container log shows no unreadable bodies, unsupported paths or errors.
 
-Remaining after step 8: **step 9 only**, roughly 1-2 working days *(est.)*: a static musl build and image, the compose switch, the `--engine` switch in the e2e harness, and the `all-minisolr` run in Open Library's stack (smoke 86/86, replay, probes 66/66 via `tools/probes_compare.py`'s approach, the `solr-updater` daemon, a real `make reindex-solr` that indexes authors through the JSON Facet API, restart persistence), plus the Linux memory number. Nothing in the behaviour is known to differ from Python on the fixtures; the one deliberate difference is that a query clause Python only warns about (an undefined field, a range on a text field, a bare term without `df`, an unknown `{!type}`) empties the whole request with a `warning` instead of just that clause.
+## Final result (step 9)
+
+Two complete runs of `OL_DIR=... MINISOLR_COMPOSE_FILE=.../compose.minisolr-rs.yaml MINISOLR_DIR=... python3 e2e/harness.py all-minisolr --down` in Open Library's dev stack (OrbStack, Apple Silicon, 16 GB RAM, 9-10 GB swap in use), every item PASS in both:
+
+| Checklist item | Result |
+|---|---|
+| up | image built, healthy via `ping` |
+| reindex (`make reindex-solr`) | 446 docs: work 35, edition 68, author 34, subject 309, as expected |
+| probe-setup, smoke | 86/86 |
+| compare | `numFound` 267/267, top-10 overlap 98.76%, facets 6/6, `/get` 41/41, 0 errors |
+| restart-solr, compare (persistence) | identical numbers after `docker compose restart solr` |
+| measure | see below |
+| probes vs real Solr | 66/66 hard checks, the same 10 soft notes as Python |
+| solr-updater daemon | edited work and new list searchable after 9 s; list create then delete: 1, then 0 |
+
+| | minisolr-rs | Python minisolr | Solr 10 (tuned) |
+|---|---|---|---|
+| Container memory idle / after load | 3.5-3.6 / 4.7-4.9 MiB | 38-41 / 42-43 MiB | about 250 MiB |
+| Latency p50 / p95 (harness) | 2.6-2.7 / 7.5-8.0 ms | 4.4-5.2 / 23-32 ms | |
+| Image | 7.67 MB | 126 MB | about 1.1 GB |
+| First image build | 3 min 33 s (2 jobs) | | |
+| Code | about 12,000 lines of Rust with tests | 1,936 lines of Python | |
+
+Remaining differences from Python minisolr: a query clause Python only warns about (an undefined field, a range on a text field, a bare term without `df`, an unknown `{!type}`) empties the whole request with a `warning` instead of dropping just that clause; nothing else is known to differ on the fixtures, the probes or the analyzers. Not proven: data sets much larger than the dev set (both servers hold everything in memory and rebuild the index after each change), and other platforms than linux/arm64 for the image (the build is plain `cargo` on Alpine, so amd64 should work).
+
+**Maintenance.** The two implementations share their fixtures, golden answers, probes and the e2e harness in the Python repo (`fixtures/`, `e2e/`); `tools/replay.py`, `tools/compare_python.py`, `tools/probes_compare.py` and `tools/roundtrip.py` here check the Rust server against them. Adding behaviour means updating both servers, or declaring one of them the reference and retiring the other; until then any change to Python minisolr needs a Rust twin and a rerun of these tools.
 
 ## Checkpoint after step 3
 
