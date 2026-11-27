@@ -26,10 +26,12 @@ pub mod ast;
 mod compile;
 mod edismax;
 mod facet;
+mod highlight;
 mod join;
 pub mod lexer;
 pub mod localparams;
 pub mod parser;
+mod pyre;
 mod sort;
 
 use serde_json::{Map, Value};
@@ -104,6 +106,10 @@ pub struct Selection {
     pub facet_counts: Option<Value>,
     /// `facets`, the JSON Facet API answer, for a JSON request with a `facet`.
     pub facets: Option<Value>,
+    /// `highlighting`, for `hl=true`.
+    pub highlighting: Option<Value>,
+    /// `spellcheck`, for `spellcheck=true`.
+    pub spellcheck: Option<Value>,
 }
 
 impl Selection {
@@ -117,6 +123,8 @@ impl Selection {
             next_cursor: None,
             facet_counts: None,
             facets: None,
+            highlighting: None,
+            spellcheck: None,
         }
     }
 }
@@ -261,7 +269,21 @@ fn execute(
         }
     });
     let fl = FieldList::parse(params.get("fl").unwrap_or("*").trim(), FL_SEPARATORS);
+    let page_ords: Vec<usize> = found.page.iter().map(|h| h.0).collect();
     let docs = project_page(store, found.page, &fl, params)?;
+    let highlighting = if params.get("hl") == Some("true") {
+        Some(highlight::highlighting(store, &page_ords, params)?)
+    } else {
+        None
+    };
+    let spellcheck = if params.get("spellcheck") == Some("true") {
+        Some(highlight::spellcheck(store, params)?)
+    } else {
+        None
+    };
+    if params.get("mlt") == Some("true") {
+        eprintln!("warning: UNSUPPORTED (ignored): mlt=true (MoreLikeThis) is not implemented");
+    }
     let facet_counts = if facets_wanted {
         Some(facet::facet_counts(store, &found.all, params)?)
     } else {
@@ -277,6 +299,8 @@ fn execute(
         next_cursor,
         facet_counts,
         facets,
+        highlighting,
+        spellcheck,
     })
 }
 

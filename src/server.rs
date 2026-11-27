@@ -382,6 +382,12 @@ pub fn select_response(
     if let Some(f) = selection.facets {
         out.insert("facets".into(), f);
     }
+    if let Some(h) = selection.highlighting {
+        out.insert("highlighting".into(), h);
+    }
+    if let Some(sc) = selection.spellcheck {
+        out.insert("spellcheck".into(), sc);
+    }
     (200, Value::Object(out))
 }
 

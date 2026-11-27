@@ -8,8 +8,9 @@ Python minisolr runs in-process (so run this with its environment), on a copy of
 
 Only requests the Rust server answers (no `warning`) are compared. Prints each request whose top-10 keys
 differ, then the top-10 overlap of both with real Solr's golden answers and how often numFound, the top-10 set
-and the top-10 order are identical, and how often the whole `facet_counts` is. Then the select and JSON probes
-of e2e/probes.py (no updates): numFound, keys, `start`, `nextCursorMark`, `facet_counts` and `facets` in full.
+and the top-10 order are identical, and how often the whole `facet_counts`, `highlighting` and `spellcheck`
+sections are. Then the select and JSON probes of e2e/probes.py (no updates): numFound, keys, `start`,
+`nextCursorMark`, `facet_counts`, `facets`, `highlighting` and `spellcheck` in full.
 """
 
 import json
@@ -51,6 +52,7 @@ def main() -> None:
             return json.loads(r.read())
 
     same_nf = same_order = same_set = n = py_ov = rs_ov = gk = fac_n = fac_same = 0
+    sections = {k: [0, 0] for k in ("highlighting", "spellcheck")}
     for r in reqs:
         params = [(k, v) for k, v in r["params"] if k not in DROP_PARAMS]
         j = rust(params)
@@ -73,11 +75,20 @@ def main() -> None:
                 fac_same += 1
             else:
                 print("FACETS DIFF", dict(r["params"]).get("ol.label"))
+        for k, tally in sections.items():
+            if k in py or k in j:
+                tally[0] += 1
+                if j.get(k) == py.get(k):
+                    tally[1] += 1
+                else:
+                    print(k.upper(), "DIFF", dict(r["params"]).get("ol.label"), json.dumps(j.get(k))[:300], "python:", json.dumps(py.get(k))[:300])
         if rk != pk:
             d = dict(r["params"])
             what = "set-equal" if set(rk) == set(pk) else f"overlap {len(set(rk) & set(pk))}/{len(pk)}"
             print("DIFF", d.get("ol.label"), repr((d.get("userWorkQuery") or d.get("q") or "")[:60]), what)
     print(f"facet_counts identical: {fac_same}/{fac_n}")
+    for k, (tn, ts) in sections.items():
+        print(f"{k} identical: {ts}/{tn}")
     probes(url, minisolr, store, search)
     shutil.rmtree(tmp, ignore_errors=True)
     print(f"overlap with golden: python {py_ov}/{gk} rust {rs_ov}/{gk}")
@@ -97,7 +108,7 @@ def probes(url: str, minisolr: Path, store: object, search: object) -> None:
             "numFound": resp.get("numFound"),
             "start": resp.get("start"),
             "keys": [d.get("key") for d in resp.get("docs", [])],
-            **{k: j.get(k) for k in ("nextCursorMark", "facet_counts", "facets")},
+            **{k: j.get(k) for k in ("nextCursorMark", "facet_counts", "facets", "highlighting", "spellcheck")},
         }
 
     same = n = 0
@@ -121,7 +132,7 @@ def probes(url: str, minisolr: Path, store: object, search: object) -> None:
             same += 1
         else:
             print("PROBE DIFF", p["name"], json.dumps(essence(j))[:300], "python:", json.dumps(essence(py))[:300])
-    print(f"select and JSON probes identical to Python (incl. start, cursor, facets): {same}/{n}")
+    print(f"select and JSON probes identical to Python (incl. start, cursor, facets, highlighting, spellcheck): {same}/{n}")
 
 
 if __name__ == "__main__":

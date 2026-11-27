@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 pub mod analysis;
+pub mod difflib;
 pub mod error;
 pub mod function;
 pub mod index;
