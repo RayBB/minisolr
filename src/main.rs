@@ -11,7 +11,7 @@ use minisolr_rs::server::{Core, serve};
 use minisolr_rs::store::Store;
 use serde_json::Value;
 
-const USAGE: &str = "usage:\n  minisolr-rs serve <conf-dir> <data-dir | docs.jsonl> [addr=127.0.0.1:8983]\n  minisolr-rs parity <conf-dir> <tokens.jsonl>\n\n<conf-dir> holds managed-schema.xml and enumsConfig.xml. A data directory (created if\nmissing) persists updates in <data-dir>/docs.jsonl; a .jsonl file is loaded and updates\nstay in memory.";
+const USAGE: &str = "usage:\n  minisolr-rs serve <conf-dir> <data-dir | docs.jsonl> [addr=127.0.0.1:8983]\n  minisolr-rs parity <conf-dir> <tokens.jsonl>\n  minisolr-rs ping [addr=127.0.0.1:8983]\n\n<conf-dir> holds managed-schema.xml and enumsConfig.xml. A data directory (created if\nmissing) persists updates in <data-dir>/docs.jsonl; a .jsonl file is loaded and updates\nstay in memory. `ping` exits 0 if the server at addr answers its ping (a healthcheck).";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -24,6 +24,8 @@ fn main() -> ExitCode {
         ["serve", conf, docs] => run_serve(conf, docs, "127.0.0.1:8983"),
         ["serve", conf, docs, addr] => run_serve(conf, docs, addr),
         ["parity", conf, tokens] => parity(conf, Path::new(tokens)),
+        ["ping"] => minisolr_rs::ping::ping("127.0.0.1:8983"),
+        ["ping", addr] => minisolr_rs::ping::ping(addr),
         _ => Err(Error::Other(USAGE.into())),
     };
     match result {

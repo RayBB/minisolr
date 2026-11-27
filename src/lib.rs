@@ -12,6 +12,7 @@ pub mod error;
 pub mod function;
 pub mod index;
 pub mod md5;
+pub mod ping;
 pub mod porter;
 pub mod query;
 pub mod schema;
