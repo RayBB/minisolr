@@ -1,6 +1,6 @@
 # minisolr-rs
 
-A Rust port of [minisolr](../minisolr), the small Solr stand-in for Open Library development. It began as a prototype of `/select` to answer two questions: how much RAM does a Rust + Tantivy version really use, and can the Solr analyzer chains be reproduced token for token. The port is complete: it is a drop-in replacement for Python minisolr in Open Library's dev stack (`make reindex-solr`, the site, the `solr-updater` daemon), at about a tenth of its memory in Docker. [PORTING.md](PORTING.md) records the steps and the measurements.
+A Rust port of [minisolr](https://github.com/RayBB/minisolr), the small Solr stand-in for Open Library development. It began as a prototype of `/select` to answer two questions: how much RAM does a Rust + Tantivy version really use, and can the Solr analyzer chains be reproduced token for token. The port is complete: it is a drop-in replacement for Python minisolr in Open Library's dev stack (`make reindex-solr`, the site, the `solr-updater` daemon), at about a tenth of its memory in Docker. [PORTING.md](PORTING.md) records the steps and the measurements.
 
 ## Run
 
@@ -151,3 +151,7 @@ Correctness on the captured Open Library requests (`tools/replay.py`): all 267 a
 ## Limits
 
 As in Python: MoreLikeThis returns nothing (`/mlt` is empty, `mlt=true` is ignored), highlighting returns whole values rather than fragments, spellcheck has no collations, analyzer components Python lacks are skipped, and JSON facets stop at `sum` and `terms` (no nested facets, `avg`, `min`, `max`, `unique`); the whole store file is rewritten on every update request and the index is rebuilt in full after a change. Unlike Python, a query clause on an undefined field (or another feature Python only warns about inside a query) makes the whole request return an empty result with a `warning`, where Python drops just that clause.
+
+## Credits and license
+
+MIT, see [LICENSE](LICENSE). The reference implementation, the fixtures and the end-to-end harness live in [minisolr](https://github.com/RayBB/minisolr); the offline tools here (`tools/`) and the commands above assume it is checked out next to this repository as `../minisolr`. Built with Claude Code.
