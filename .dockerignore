@@ -1,0 +1,5 @@
+# The build needs only the manifest and the sources.
+*
+!Cargo.toml
+!Cargo.lock
+!src
