@@ -6,7 +6,6 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use minisolr_rs::Error;
-use minisolr_rs::analysis::Analyzer;
 use minisolr_rs::schema::{Kind, Schema};
 use minisolr_rs::server::{Core, serve};
 use minisolr_rs::store::Store;
@@ -38,6 +37,14 @@ fn main() -> ExitCode {
 
 fn run_serve(conf: &str, data: &str, addr: &str) -> Result<(), Error> {
     let schema = Arc::new(Schema::load(Path::new(conf))?);
+    let warnings = schema.analysis_warnings();
+    if !warnings.is_empty() {
+        eprintln!(
+            "warning: analyzer components with no implementation are skipped (filters) or use the standard tokenizer, as in Python, in {} field types: {}",
+            warnings.len(),
+            warnings.join("; ")
+        );
+    }
     let data = Path::new(data);
     let store = if data.is_file() {
         let mut store = Store::new(Arc::clone(&schema), None);
@@ -55,7 +62,6 @@ fn run_serve(conf: &str, data: &str, addr: &str) -> Result<(), Error> {
 /// Each field's chain comes from the schema; rows for non-text fields are skipped.
 fn parity(conf: &str, path: &Path) -> Result<(), Error> {
     let schema = Schema::load(Path::new(conf))?;
-    let analyzer = Analyzer::new();
     let mut stats: Vec<(String, usize, usize)> = Vec::new();
     let mut shown = 0;
     for line in BufReader::new(std::fs::File::open(path)?).lines() {
@@ -69,7 +75,9 @@ fn parity(conf: &str, path: &Path) -> Result<(), Error> {
         if field.kind != Kind::Text {
             continue;
         }
-        let chain = field.chain;
+        let Some(ftype) = schema.field_type(&field) else {
+            continue;
+        };
         let strings = |key: &str| -> Vec<String> {
             row.get(key)
                 .and_then(Value::as_array)
@@ -80,7 +88,7 @@ fn parity(conf: &str, path: &Path) -> Result<(), Error> {
                 })
         };
         let want = (strings("main"), strings("extra"));
-        let got = analyzer.index(chain, value);
+        let got = ftype.index.index(value);
         let ok = (got.main.clone(), got.extra.clone()) == want;
         match stats.iter_mut().find(|(n, ..)| n == name) {
             Some(entry) => {

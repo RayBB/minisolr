@@ -7,11 +7,12 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 
 use serde_json::{Map, Value};
 
 use crate::Error;
-use crate::analysis::Chain;
+use crate::analysis::{Analyzer, Component, Resources};
 
 /// What a field holds, derived from its field type class (same names as `schema.py`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -75,50 +76,26 @@ impl Kind {
     }
 }
 
-/// An analyzer element: tokenizer and filter names in order, as lowercased Solr SPI names
-/// (Lucene looks SPI names up case-insensitively).
+/// An analyzer element: its tokenizer and filters in chain order, with lowercased Solr
+/// SPI names (Lucene looks SPI names up case-insensitively).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AnalyzerSpec {
-    /// Tokenizer name, such as `whitespace` or `standard`.
-    pub tokenizer: String,
-    /// Filter names, such as `icufolding`, in chain order.
-    pub filters: Vec<String>,
+    /// The tokenizer, such as `whitespace` or `standard`.
+    pub tokenizer: Component,
+    /// The filters, such as `icufolding`.
+    pub filters: Vec<Component>,
 }
 
 impl AnalyzerSpec {
-    /// The implemented chain that produces the same tokens, if there is one.
-    ///
-    /// `stop` is ignored because the shipped stop lists are empty, `flattenGraph` because
-    /// it does not change token text, and `synonymGraph` because query-time synonyms are
-    /// not implemented.
+    /// The filter names, in order.
     #[must_use]
-    pub fn chain(&self) -> Option<Chain> {
-        let filters: Vec<&str> = self
-            .filters
-            .iter()
-            .map(String::as_str)
-            .filter(|f| !matches!(*f, "stop" | "flattengraph" | "synonymgraph"))
-            .collect();
-        match (self.tokenizer.as_str(), filters.as_slice()) {
-            (
-                "whitespace",
-                [
-                    "icufolding",
-                    "worddelimitergraph",
-                    "lowercase",
-                    "keywordmarker",
-                    "porterstem",
-                ],
-            ) => Some(Chain::EnSplitting),
-            ("standard", ["icufolding"]) => Some(Chain::International),
-            ("standard", ["lowercase"]) => Some(Chain::General),
-            _ => None,
-        }
+    pub fn filter_names(&self) -> Vec<&str> {
+        self.filters.iter().map(|f| f.name.as_str()).collect()
     }
 }
 
 /// A `<fieldType>`.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct FieldType {
     /// Type name.
     pub name: String,
@@ -130,10 +107,13 @@ pub struct FieldType {
     pub index_analyzer: Option<AnalyzerSpec>,
     /// Query-time analyzer.
     pub query_analyzer: Option<AnalyzerSpec>,
-    /// The chain used for text: implemented when `chain_implemented`, else the fallback.
-    pub chain: Chain,
-    /// False when a text type's analyzer has no Rust implementation.
-    pub chain_implemented: bool,
+    /// The index-time chain (one token per value when the type has no index analyzer).
+    pub index: Arc<Analyzer>,
+    /// The query-time chain (the whole text as one token when there is no query analyzer,
+    /// as in Python, which does not fall back to the index analyzer).
+    pub query: Arc<Analyzer>,
+    /// Tokenizers and filters of either analyzer that are not implemented (skipped).
+    pub skipped: Vec<String>,
     /// Enum values in sort order (`EnumFieldType` only).
     pub enum_values: Vec<String>,
     attrs: HashMap<String, String>,
@@ -160,8 +140,6 @@ pub struct Field {
     pub type_name: String,
     /// Kind of the field type.
     pub kind: Kind,
-    /// Analyzer chain of the field type (meaningful for text).
-    pub chain: Chain,
     /// `indexed` attribute after defaults.
     pub indexed: bool,
     /// `stored` attribute after defaults.
@@ -220,20 +198,32 @@ impl Schema {
         } else {
             None
         };
-        Self::parse(&schema, enums.as_deref())
+        Self::parse_with(&schema, enums.as_deref(), &Resources::new(Some(conf_dir)))
     }
 
-    /// Parses schema XML and optional enums XML.
+    /// Parses schema XML and optional enums XML, with no word list files.
     ///
     /// # Errors
     /// Fails on malformed XML or a field whose type is not defined.
     pub fn parse(schema_xml: &str, enums_xml: Option<&str>) -> Result<Self, Error> {
+        Self::parse_with(schema_xml, enums_xml, &Resources::default())
+    }
+
+    /// Parses schema XML and optional enums XML; analyzers read word lists from `res`.
+    ///
+    /// # Errors
+    /// Fails on malformed XML or a field whose type is not defined.
+    pub fn parse_with(
+        schema_xml: &str,
+        enums_xml: Option<&str>,
+        res: &Resources,
+    ) -> Result<Self, Error> {
         let enums = enums_xml.map(parse_enums).transpose()?.unwrap_or_default();
         let doc = roxmltree::Document::parse(schema_xml)?;
         let root = doc.root_element();
         let mut types = HashMap::new();
         for el in children(root, "fieldType") {
-            let t = field_type(el, &enums);
+            let t = field_type(el, &enums, res);
             types.insert(t.name.clone(), t);
         }
         let mut fields = HashMap::new();
@@ -285,6 +275,25 @@ impl Schema {
     #[must_use]
     pub fn field_type(&self, field: &Field) -> Option<&FieldType> {
         self.types.get(&field.type_name)
+    }
+
+    /// One line per text field type that a field or dynamic field uses and whose
+    /// analyzers have components with no implementation, naming the type and the
+    /// components (skipped filters; tokenizers replaced by the standard one).
+    #[must_use]
+    pub fn analysis_warnings(&self) -> Vec<String> {
+        let used: std::collections::BTreeSet<&str> = self
+            .fields
+            .values()
+            .chain(&self.dynamic)
+            .filter(|f| f.kind == Kind::Text)
+            .map(|f| f.type_name.as_str())
+            .collect();
+        used.into_iter()
+            .filter_map(|name| self.types.get(name))
+            .filter(|t| !t.skipped.is_empty())
+            .map(|t| format!("{}: {}", t.name, t.skipped.join(", ")))
+            .collect()
     }
 
     /// The document as search sees it: copyField destinations get the source values
@@ -399,22 +408,36 @@ fn parse_enums(xml: &str) -> Result<HashMap<String, Vec<String>>, Error> {
         .collect())
 }
 
-fn field_type(el: roxmltree::Node<'_, '_>, enums: &HashMap<String, Vec<String>>) -> FieldType {
+fn field_type(
+    el: roxmltree::Node<'_, '_>,
+    enums: &HashMap<String, Vec<String>>,
+    res: &Resources,
+) -> FieldType {
     let class = attr(el, "class").to_owned();
     let kind = Kind::from_class(&class);
     let mut index_analyzer = None;
     let mut query_analyzer = None;
+    let (mut index, mut query) = (Arc::new(Analyzer::raw()), Arc::new(Analyzer::raw()));
+    let mut skipped: Vec<String> = Vec::new();
     for a in children(el, "analyzer") {
         let spec = analyzer(a);
+        let (built, missing) = Analyzer::build(&spec.tokenizer, &spec.filters, res);
+        for m in missing {
+            if !skipped.contains(&m) {
+                skipped.push(m);
+            }
+        }
+        let built = Arc::new(built);
         let which = a.attribute("type");
         if matches!(which, None | Some("index")) {
             index_analyzer = Some(spec.clone());
+            index = Arc::clone(&built);
         }
         if matches!(which, None | Some("query")) {
             query_analyzer = Some(spec);
+            query = built;
         }
     }
-    let implemented = index_analyzer.as_ref().and_then(AnalyzerSpec::chain);
     let enum_values = if kind == Kind::Enum {
         enums.get(attr(el, "enumName")).cloned().unwrap_or_default()
     } else {
@@ -426,8 +449,9 @@ fn field_type(el: roxmltree::Node<'_, '_>, enums: &HashMap<String, Vec<String>>)
         kind,
         index_analyzer,
         query_analyzer,
-        chain: implemented.unwrap_or(Chain::WhitespaceLowercase),
-        chain_implemented: implemented.is_some() || kind != Kind::Text,
+        index,
+        query,
+        skipped,
         enum_values,
         attrs: el
             .attributes()
@@ -437,13 +461,20 @@ fn field_type(el: roxmltree::Node<'_, '_>, enums: &HashMap<String, Vec<String>>)
 }
 
 fn analyzer(el: roxmltree::Node<'_, '_>) -> AnalyzerSpec {
+    let component = |c: roxmltree::Node<'_, '_>, suffix: &str| Component {
+        name: spi_name(c, suffix),
+        attrs: c
+            .attributes()
+            .map(|a| (a.name().to_owned(), a.value().to_owned()))
+            .collect(),
+    };
     AnalyzerSpec {
         tokenizer: children(el, "tokenizer")
             .next()
-            .map(|t| spi_name(t, "TokenizerFactory"))
+            .map(|t| component(t, "TokenizerFactory"))
             .unwrap_or_default(),
         filters: children(el, "filter")
-            .map(|f| spi_name(f, "FilterFactory"))
+            .map(|f| component(f, "FilterFactory"))
             .collect(),
     }
 }
@@ -477,7 +508,6 @@ fn field(el: roxmltree::Node<'_, '_>, types: &HashMap<String, FieldType>) -> Res
         name: name.to_owned(),
         type_name: type_name.to_owned(),
         kind: t.kind,
-        chain: t.chain,
         indexed: flag("indexed", true),
         stored: flag("stored", true),
         multi: flag("multiValued", false),
@@ -601,20 +631,36 @@ mod tests {
     }
 
     #[test]
-    fn analyzers_map_to_chains() {
+    fn analyzers_are_built_from_the_elements() {
         let s = schema();
         let en = s.types.get("text_en_splitting").expect("type");
-        assert_eq!((en.chain, en.chain_implemented), (Chain::EnSplitting, true));
+        assert!(en.skipped.is_empty());
         assert_eq!(en.query_analyzer.as_ref().map(|a| a.filters.len()), Some(2));
+        assert_eq!(en.index.index("Wi-Fi").main, ["wi", "fi"]);
+        assert_eq!(en.query.query("Wi-Fi"), [["wi-fi"]]);
         let general = s.types.get("text_general").expect("type");
         assert_eq!(
-            general.index_analyzer.as_ref().map(|a| a.filters.clone()),
-            Some(vec!["stop".to_owned(), "lowercase".to_owned()])
+            general
+                .index_analyzer
+                .as_ref()
+                .map(AnalyzerSpec::filter_names),
+            Some(vec!["stop", "lowercase"])
         );
-        assert_eq!(general.chain, Chain::General);
-        let de = s.get("notes_txt_de").expect("dynamic text");
-        assert_eq!(de.chain, Chain::WhitespaceLowercase);
-        assert!(!s.types.get("text_de").is_some_and(|t| t.chain_implemented));
+        assert_eq!(
+            general
+                .index_analyzer
+                .as_ref()
+                .and_then(|a| a.filters.first())
+                .and_then(|f| f.attrs.get("words"))
+                .map(String::as_str),
+            Some("stopwords.txt")
+        );
+        assert_eq!(general.query.query("The X"), [["the"], ["x"]]);
+        let de = s.types.get("text_de").expect("type");
+        assert_eq!(de.skipped, ["germanlightstem"]);
+        assert_eq!(s.analysis_warnings(), ["text_de: germanlightstem"]);
+        let plain = s.types.get("string").expect("type");
+        assert_eq!(plain.query.query("A b"), [["A b"]]);
     }
 
     #[test]
@@ -674,10 +720,28 @@ mod tests {
         let s = Schema::load(&conf).expect("real schema parses");
         assert_eq!(s.unique_key, "key");
         assert!(s.fields.len() > 100 && s.dynamic.len() > 50);
-        let chain = |n: &str| s.get(n).map(|f| f.chain);
-        assert_eq!(chain("title"), Some(Chain::EnSplitting));
-        assert_eq!(chain("author_name"), Some(Chain::International));
-        assert_eq!(chain("place"), Some(Chain::General));
+        let index = |n: &str, v: &str| {
+            s.get(n)
+                .and_then(|f| s.field_type(&f).map(|t| t.index.index(v).main))
+                .unwrap_or_default()
+        };
+        assert_eq!(index("title", "Running dontstems"), ["run", "dontstems"]);
+        assert_eq!(
+            index("author_name", "García Márquez"),
+            ["garcia", "marquez"]
+        );
+        assert_eq!(index("place", "New York"), ["new", "york"]);
+        let query = |n: &str, v: &str| {
+            s.get(n)
+                .and_then(|f| s.field_type(&f).map(|t| t.query.query(v)))
+                .unwrap_or_default()
+        };
+        assert_eq!(query("title", "aaafoo"), [["aaabar"]]);
+        assert!(
+            s.analysis_warnings()
+                .iter()
+                .any(|w| w.starts_with("text_de: "))
+        );
         assert_eq!(s.get("osp_count").map(|f| f.kind), Some(Kind::Int));
         assert_eq!(s.get("public_scan_b").map(|f| f.kind), Some(Kind::Bool));
         let access = s.get("ebook_access").expect("ebook_access");

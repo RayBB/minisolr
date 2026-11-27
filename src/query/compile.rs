@@ -290,9 +290,11 @@ impl<'p> Compiler<'p> {
                 if wild {
                     return regex(field, &wildcard_regex(&fold(text))).map(Some);
                 }
-                let positions = store.analyzer.query(def.chain, text);
-                if let (Some(distance), [only]) = (opts.fuzzy, positions.as_slice()) {
-                    return Ok(Some(fuzzy(field, only, distance)));
+                let positions = indexed.query_analyzer.query(text);
+                if let (Some(distance), [only]) = (opts.fuzzy, positions.as_slice())
+                    && let Some(first) = only.first()
+                {
+                    return Ok(Some(fuzzy(field, first, distance)));
                 }
                 let auto_phrase = opts.phrase
                     || store
@@ -441,7 +443,7 @@ fn enum_range<'v>(values: &'v [String], b: &RangeBounds<'_>) -> &'v [String] {
 /// `autoGeneratePhraseQueries`), or one clause per position joined by the default operator.
 fn positions_query(
     field: Field,
-    positions: &[String],
+    positions: &[Vec<String>],
     phrase: bool,
     slop: u32,
     and_op: bool,
@@ -449,18 +451,83 @@ fn positions_query(
     let term = |t: &str| Term::from_field_text(field, t);
     let term_query =
         |t: &str| Box::new(TermQuery::new(term(t), IndexRecordOption::WithFreqs)) as Box<dyn Query>;
+    let any_of = |qs: Vec<Box<dyn Query>>| -> Box<dyn Query> {
+        if qs.len() == 1 {
+            qs.into_iter()
+                .next()
+                .unwrap_or_else(|| Box::new(EmptyQuery))
+        } else {
+            Box::new(BooleanQuery::new(
+                qs.into_iter().map(|q| (Occur::Should, q)).collect(),
+            ))
+        }
+    };
+    let alternatives = |alts: &[String]| any_of(alts.iter().map(|t| term_query(t)).collect());
     match positions {
         [] => None,
-        [only] => Some(term_query(only)),
-        _ if phrase => Some(Box::new(PhraseQuery::new_with_offset_and_slop(
-            positions.iter().map(|t| term(t)).enumerate().collect(),
-            slop,
-        ))),
+        [only] => Some(alternatives(only)),
+        _ if phrase => {
+            let phrases = phrase_combinations(positions, MAX_PHRASE_COMBINATIONS)
+                .into_iter()
+                .map(|words| {
+                    Box::new(PhraseQuery::new_with_offset_and_slop(
+                        words.into_iter().map(term).enumerate().collect(),
+                        slop,
+                    )) as Box<dyn Query>
+                })
+                .collect();
+            Some(any_of(phrases))
+        }
         _ => {
             let occur = if and_op { Occur::Must } else { Occur::Should };
             Some(Box::new(BooleanQuery::new(
-                positions.iter().map(|t| (occur, term_query(t))).collect(),
+                positions
+                    .iter()
+                    .map(|alts| (occur, alternatives(alts)))
+                    .collect(),
             )))
+        }
+    }
+}
+
+/// How many phrases the alternatives of a multi-position phrase expand to at most
+/// (Python takes the first 8 of `itertools.product`).
+const MAX_PHRASE_COMBINATIONS: usize = 8;
+
+/// The first `limit` combinations of one alternative per position, in
+/// `itertools.product` order (the last position varies fastest).
+fn phrase_combinations(positions: &[Vec<String>], limit: usize) -> Vec<Vec<&str>> {
+    let mut out = Vec::new();
+    if positions.iter().any(Vec::is_empty) {
+        return out;
+    }
+    let mut picks = vec![0usize; positions.len()];
+    loop {
+        out.push(
+            positions
+                .iter()
+                .zip(&picks)
+                .filter_map(|(alts, &i)| alts.get(i).map(String::as_str))
+                .collect(),
+        );
+        if out.len() >= limit {
+            return out;
+        }
+        // Advance like an odometer from the last position.
+        let mut k = positions.len();
+        loop {
+            let Some(next) = k.checked_sub(1) else {
+                return out;
+            };
+            k = next;
+            let (Some(pick), Some(alts)) = (picks.get_mut(k), positions.get(k)) else {
+                return out;
+            };
+            *pick += 1;
+            if *pick < alts.len() {
+                break;
+            }
+            *pick = 0;
         }
     }
 }

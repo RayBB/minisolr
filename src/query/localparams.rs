@@ -173,7 +173,8 @@ impl Compiler<'_> {
                 .collect::<Result<_, _>>()?,
             Kind::Text => values
                 .iter()
-                .flat_map(|x| self.store.analyzer.query(def.chain, x))
+                .flat_map(|x| indexed.query_analyzer.query(x))
+                .filter_map(|alts| alts.into_iter().next())
                 .map(|t| Term::from_field_text(field, &t))
                 .collect(),
             _ => values

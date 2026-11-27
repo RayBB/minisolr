@@ -6,7 +6,6 @@ use std::path::Path;
 use std::thread;
 use std::time::Duration;
 
-use minisolr_rs::analysis::{Analyzer, Chain};
 use minisolr_rs::schema::Schema;
 use minisolr_rs::server::{Core, serve};
 use minisolr_rs::store::Store;
@@ -174,18 +173,17 @@ fn book_search_shape_with_block_join_ranges_and_or() -> TestResult {
 }
 
 #[test]
-fn analyzers_match_recorded_python_output() {
-    let a = Analyzer::new();
-    let en = |t| a.index(Chain::EnSplitting, t).main;
+fn analyzers_match_recorded_python_output() -> TestResult {
+    let schema = Schema::load(Path::new("tests/data/conf"))?;
+    let en_type = schema.types.get("text_en_splitting").ok_or("type")?;
+    let en = |t| en_type.index.index(t).main;
     assert_eq!(en("The Odyssey"), ["the", "odyssei"]);
     assert_eq!(
         en("Three cups of tea: one man's mission"),
         ["three", "cup", "of", "tea", "on", "man", "mission"]
     );
-    assert_eq!(
-        a.index(Chain::EnSplitting, "promote peace--one").extra,
-        ["peaceon"]
-    );
+    assert_eq!(en_type.index.index("promote peace--one").extra, ["peaceon"]);
+    Ok(())
 }
 
 #[test]

@@ -9,7 +9,7 @@
 //! to its row. The index is a derived cache: [`crate::server::Core`] rebuilds it when the
 //! store version moves on and a search arrives.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -19,7 +19,7 @@ use tantivy::schema::{Field, IndexRecordOption, NumericOptions, TextFieldIndexin
 use tantivy::{IndexReader, ReloadPolicy, TantivyDocument};
 
 use crate::Error;
-use crate::analysis::Analyzer;
+use crate::analysis::{Analyzer, fold};
 use crate::schema::{self, Kind, Schema};
 
 /// A schema field that is in the Tantivy index.
@@ -29,14 +29,20 @@ pub struct Indexed {
     pub def: schema::Field,
     /// The Tantivy field handle.
     pub handle: Field,
+    /// The field type's index-time analyzer (text fields).
+    pub index_analyzer: Arc<Analyzer>,
+    /// The field type's query-time analyzer (text fields).
+    pub query_analyzer: Arc<Analyzer>,
 }
 
 /// A snapshot of the documents and their index.
 pub struct Index {
     /// The schema the index was built from.
     pub schema: Arc<Schema>,
-    /// The analyzer shared by indexing and querying.
-    pub analyzer: Analyzer,
+    /// The spellcheck dictionary, sorted: every whitespace-separated word longer than
+    /// three characters in the `title`, `author_name` and `name` values, folded (Python's
+    /// `Store.term_dict`).
+    pub term_dict: Vec<String>,
     /// Rows in `ord` order (the store's order), as stored.
     pub docs: Vec<Arc<Value>>,
     /// The store version this snapshot was built from.
@@ -151,8 +157,6 @@ impl Index {
                 }
             }
         }
-        warn_fallback_chains(&schema, defs.values());
-
         let mut builder = tantivy::schema::Schema::builder();
         let ord = builder.add_u64_field("ord", NumericOptions::default().set_fast());
         let mut names: Vec<String> = defs.keys().cloned().collect();
@@ -172,15 +176,28 @@ impl Index {
                 }
                 _ => builder.add_text_field(&name, text_options("raw", IndexRecordOption::Basic)),
             };
-            fields.insert(name, Indexed { def, handle });
+            let (index_analyzer, query_analyzer) = schema.field_type(&def).map_or_else(
+                || (Arc::new(Analyzer::raw()), Arc::new(Analyzer::raw())),
+                |t| (Arc::clone(&t.index), Arc::clone(&t.query)),
+            );
+            fields.insert(
+                name,
+                Indexed {
+                    def,
+                    handle,
+                    index_analyzer,
+                    query_analyzer,
+                },
+            );
         }
         let index = tantivy::Index::create_in_ram(builder.build());
-        let analyzer = Analyzer::new();
+        let mut terms = BTreeSet::new();
         {
             let mut writer = index.writer_with_num_threads::<TantivyDocument>(1, 15_000_000)?;
             for (i, doc) in docs.iter().enumerate() {
                 let row = schema.effective(object(doc, &empty));
-                writer.add_document(to_tantivy(&row, i as u64, ord, &fields, analyzer))?;
+                add_spelling_terms(&row, &fields, &mut terms);
+                writer.add_document(to_tantivy(&row, i as u64, ord, &fields))?;
             }
             writer.commit()?;
         }
@@ -195,7 +212,7 @@ impl Index {
             .collect();
         Ok(Self {
             schema,
-            analyzer,
+            term_dict: terms.into_iter().collect(),
             docs,
             version,
             reader,
@@ -263,18 +280,27 @@ fn object<'a>(doc: &'a Value, empty: &'a Map<String, Value>) -> &'a Map<String, 
     doc.as_object().unwrap_or(empty)
 }
 
-fn warn_fallback_chains<'a>(schema: &Schema, defs: impl Iterator<Item = &'a schema::Field>) {
-    let mut warned = HashSet::new();
-    for def in defs {
-        if def.kind == Kind::Text
-            && let Some(t) = schema.field_type(def)
-            && !t.chain_implemented
-            && warned.insert(t.name.clone())
-        {
-            eprintln!(
-                "warning: field type {} has no implemented analyzer; using whitespace + lowercase (first field: {})",
-                t.name, def.name
-            );
+/// Adds a row's words to the spellcheck dictionary, as Python's `_index_value` does for
+/// the indexed text fields `title`, `author_name` and `name`.
+fn add_spelling_terms(
+    row: &Map<String, Value>,
+    fields: &HashMap<String, Indexed>,
+    terms: &mut BTreeSet<String>,
+) {
+    for name in ["title", "author_name", "name"] {
+        let (Some(raw), Some(f)) = (row.get(name), fields.get(name)) else {
+            continue;
+        };
+        if f.def.kind != Kind::Text {
+            continue;
+        }
+        for v in values(raw).filter(|v| !v.is_null()) {
+            let text = crate::query::py_str(v);
+            for word in crate::unicode::split_whitespace(&text) {
+                if word.chars().count() > 3 {
+                    terms.insert(fold(word));
+                }
+            }
         }
     }
 }
@@ -300,12 +326,17 @@ fn to_tantivy(
     ord_value: u64,
     ord: Field,
     fields: &HashMap<String, Indexed>,
-    analyzer: Analyzer,
 ) -> TantivyDocument {
     let mut out = TantivyDocument::default();
     out.add_u64(ord, ord_value);
     for (name, raw) in row {
-        let Some(Indexed { def, handle }) = fields.get(name) else {
+        let Some(Indexed {
+            def,
+            handle,
+            index_analyzer,
+            ..
+        }) = fields.get(name)
+        else {
             continue;
         };
         let field = *handle;
@@ -313,7 +344,7 @@ fn to_tantivy(
             match (def.kind, v) {
                 (_, Value::Null) => {}
                 (Kind::Text, _) => {
-                    let analysis = analyzer.index(def.chain, &as_text(v));
+                    let analysis = index_analyzer.index(&crate::query::py_str(v));
                     if !analysis.main.is_empty() {
                         out.add_text(field, analysis.main.join(" "));
                     }
