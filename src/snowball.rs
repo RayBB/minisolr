@@ -294,6 +294,11 @@ impl Env {
 
     fn slice_from(&mut self, s: &str) {
         let (c_bra, c_ket) = (self.bra, self.ket.min(self.cur.len()));
+        // Python asserts `bra <= ket <= limit`; the routines keep it, but a slip must not
+        // abort the server (release builds abort on panic).
+        if c_bra > c_ket || self.limit > self.cur.len() {
+            return;
+        }
         let new: Vec<char> = s.chars().collect();
         let old_len = c_ket.saturating_sub(c_bra);
         let new_len = new.len();
