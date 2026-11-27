@@ -16,6 +16,7 @@ pub mod query;
 pub mod schema;
 pub mod server;
 pub mod store;
+pub mod unicode;
 pub mod update;
 
 pub use error::Error;
