@@ -13,11 +13,13 @@ Requests are chosen as in minisolr's e2e/harness.py `select_requests`: top-level
 `ol.label` param and no `{params...}` keys, de-duplicated by their params; `timeAllowed` is dropped.
 A request is answerable when the response has a `response` and no `warning` in `responseHeader`.
 For selects that return `editions:[subquery]`, the first edition of each of the top 10 is compared
-too (harness `edition_firsts`). The captured /get requests are replayed and compared as the
+too (harness `edition_firsts`), and for selects whose golden answer has facets, the first 5
+entries of each `facet_fields` list must be equal (harness `facets`). The captured /get requests are replayed and compared as the
 harness's `summarize_get` does (list values unordered: Open Library builds some from sets).
 
 With --probes, every probe of e2e/probes.py runs in order, including the update lifecycle (it adds
-and then deletes /works/OL999999W, so the server ends as it started) and the get/export probes.
+and then deletes /works/OL999999W, so the server ends as it started), the get/export probes and the
+JSON Request API probe (a JSON body POSTed to /query), with the hard checks of probes.py `compare`.
 """
 
 from __future__ import annotations
@@ -77,7 +79,7 @@ def replay(base: str, fixtures: Path, verbose: bool, subset_out: Path | None) ->
     reqs = json.loads((fixtures / "requests.json").read_text())
     gold = json.loads((fixtures / "golden.json").read_text())["select"]
     sels = [r for r in select_requests(reqs) if json.dumps(r["params"]) in gold]
-    answerable = nf_equal = set_equal = overlap = gold_keys = ed_n = ed_equal = 0
+    answerable = nf_equal = set_equal = overlap = gold_keys = ed_n = ed_equal = fac_n = fac_equal = 0
     reasons: Counter[str] = Counter()
     misses: list[str] = []
     unanswered: list[str] = []
@@ -105,6 +107,12 @@ def replay(base: str, fixtures: Path, verbose: bool, subset_out: Path | None) ->
         if "edition_firsts" in g:
             ed_n += 1
             ed_equal += edition_firsts(j) == g["edition_firsts"]
+        if g.get("facets"):
+            fac_n += 1
+            if facets(j) == g["facets"]:
+                fac_equal += 1
+            else:
+                misses.append(f"{label}: facets differ: {json.dumps(facets(j))[:300]}")
         if not n_ok or set(keys) != set(g["keys"]):
             misses.append(f"{label} fq={d.get('fq')!r}: numFound {resp.get('numFound')} vs {g['numFound']}, top-10 overlap {common}/{len(g['keys'])}")
     pct = 100.0 * overlap / gold_keys if gold_keys else 0.0
@@ -114,6 +122,7 @@ def replay(base: str, fixtures: Path, verbose: bool, subset_out: Path | None) ->
     print(f"top-10 set equal: {set_equal}/{answerable}")
     print(f"top-10 key overlap: {overlap}/{gold_keys} ({pct:.2f}%)")
     print(f"editions:[subquery] first edition of the top 10 equal: {ed_equal}/{ed_n}")
+    print(f"facets (top 5 per facet field) equal: {fac_equal}/{fac_n}")
     print(f"unanswered: {len(sels) - answerable}")
     for reason, n in reasons.most_common():
         print(f"  {n:4d}  {reason}")
@@ -134,6 +143,12 @@ def edition_firsts(j: dict[str, Any]) -> list[Any]:
         eds = d["editions"].get("docs") if isinstance(d.get("editions"), dict) else None
         out.append(eds[0].get("key") if eds else None)
     return out
+
+
+def facets(j: dict[str, Any]) -> dict[str, Any]:
+    """harness.py `facets`: the first 5 entries of each facet_fields list, pairs as lists."""
+    f = j.get("facet_counts", {}).get("facet_fields", {})
+    return {k: [list(x) if isinstance(x, list) else x for x in v][:5] for k, v in f.items()}
 
 
 def unordered(v: Any) -> Any:
@@ -163,7 +178,8 @@ def replay_get(base: str, reqs: list[dict[str, Any]], gold: dict[str, Any], verb
 
 
 def probe_essence(p: dict[str, Any], j: dict[str, Any]) -> dict[str, Any]:
-    """The select part of e2e/probes.py `norm`: numFound, top-10 keys, docs when `fl` lists fields."""
+    """The select part of e2e/probes.py `norm`: numFound, top-10 keys, docs when `fl` lists fields,
+    facet_fields, facet_queries, the JSON facets and whether the cursor advanced."""
     resp = j.get("response", {})
     out: dict[str, Any] = {}
     if resp:
@@ -173,6 +189,13 @@ def probe_essence(p: dict[str, Any], j: dict[str, Any]) -> dict[str, Any]:
         fl = p.get("params", {}).get("fl", "")
         if "," in fl and "editions" not in fl and "[child]" not in fl:
             out["docs"] = [{k: v for k, v in d.items() if k != "score"} for d in docs[:10]]
+    if "facet_counts" in j:
+        out["facet_fields"] = j["facet_counts"].get("facet_fields")
+        out["facet_queries"] = j["facet_counts"].get("facet_queries")
+    if "facets" in j:
+        out["json_facets"] = j["facets"]
+    if "nextCursorMark" in j:
+        out["cursor_advances"] = j["nextCursorMark"] != "*"
     return out
 
 
@@ -229,11 +252,14 @@ def probes(base: str, fixtures: Path, verbose: bool) -> None:
             else:
                 other_ok += 1
             continue
-        if kind != "select" or g is None or "error" in g:
+        if kind not in ("select", "json") or g is None or "error" in g:
             continue
         total += 1
-        pairs = [(k, str(x)) for k, v in p["params"].items() for x in (v if isinstance(v, list) else [v])]
-        j = post(base, pairs)
+        if kind == "json":
+            j = post(base, [], "/query", body=p["body"])
+        else:
+            pairs = [(k, str(x)) for k, v in p["params"].items() for x in (v if isinstance(v, list) else [v])]
+            j = post(base, pairs)
         if reason := unanswered_reason(j):
             reasons[reason_group(reason)] += 1
             continue
@@ -250,11 +276,14 @@ def probes(base: str, fixtures: Path, verbose: bool) -> None:
                 bad.append(f"top-10 sets differ {common}/{len(gk)}")
         if "docs" in g and not p.get("count_only") and g["docs"] != r.get("docs"):
             bad.append("docs differ")
+        for k in ("facet_fields", "facet_queries", "json_facets", "cursor_advances"):
+            if k in g and g[k] != r.get(k):
+                bad.append(f"{k} differ: {json.dumps(r.get(k))[:200]}")
         if bad:
             fails.append(f"{p['name']}: " + "; ".join(bad))
         else:
             ok += 1
-    print(f"select probes with golden: {total}; answerable: {answered}; match: {ok}/{answered}")
+    print(f"select and JSON probes with golden: {total}; answerable: {answered}; match: {ok}/{answered}")
     for reason, n in reasons.most_common():
         print(f"  {n:4d}  {reason}")
     print(f"update/get/export probes with golden: {other_total}; match: {other_ok}/{other_total}")

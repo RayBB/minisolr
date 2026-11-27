@@ -8,7 +8,8 @@ Python minisolr runs in-process (so run this with its environment), on a copy of
 
 Only requests the Rust server answers (no `warning`) are compared. Prints each request whose top-10 keys
 differ, then the top-10 overlap of both with real Solr's golden answers and how often numFound, the top-10 set
-and the top-10 order are identical.
+and the top-10 order are identical, and how often the whole `facet_counts` is. Then the select and JSON probes
+of e2e/probes.py (no updates): numFound, keys, `start`, `nextCursorMark`, `facet_counts` and `facets` in full.
 """
 
 import json
@@ -49,7 +50,7 @@ def main() -> None:
         with urllib.request.urlopen(urllib.request.Request(url + "/select", data=data), timeout=60) as r:
             return json.loads(r.read())
 
-    same_nf = same_order = same_set = n = py_ov = rs_ov = gk = 0
+    same_nf = same_order = same_set = n = py_ov = rs_ov = gk = fac_n = fac_same = 0
     for r in reqs:
         params = [(k, v) for k, v in r["params"] if k not in DROP_PARAMS]
         j = rust(params)
@@ -66,16 +67,61 @@ def main() -> None:
         same_nf += j["response"]["numFound"] == py["response"]["numFound"]
         same_set += set(rk) == set(pk)
         same_order += rk == pk
+        if "facet_counts" in py or "facet_counts" in j:
+            fac_n += 1
+            if j.get("facet_counts") == py.get("facet_counts"):
+                fac_same += 1
+            else:
+                print("FACETS DIFF", dict(r["params"]).get("ol.label"))
         if rk != pk:
             d = dict(r["params"])
             what = "set-equal" if set(rk) == set(pk) else f"overlap {len(set(rk) & set(pk))}/{len(pk)}"
             print("DIFF", d.get("ol.label"), repr((d.get("userWorkQuery") or d.get("q") or "")[:60]), what)
+    print(f"facet_counts identical: {fac_same}/{fac_n}")
+    probes(url, minisolr, store, search)
     shutil.rmtree(tmp, ignore_errors=True)
     print(f"overlap with golden: python {py_ov}/{gk} rust {rs_ov}/{gk}")
     print(
         f"compared {n}: numFound equal {same_nf}, top-10 set equal {same_set}, top-10 order equal {same_order} "
         f"(python boosts {'neutralized' if neutral else 'on'})"
     )
+
+
+def probes(url: str, minisolr: Path, store: object, search: object) -> None:
+    sys.path.insert(0, str(minisolr / "e2e"))
+    import probes as probe_defs
+
+    def essence(j: dict) -> dict:
+        resp = j.get("response", {})
+        return {
+            "numFound": resp.get("numFound"),
+            "start": resp.get("start"),
+            "keys": [d.get("key") for d in resp.get("docs", [])],
+            **{k: j.get(k) for k in ("nextCursorMark", "facet_counts", "facets")},
+        }
+
+    same = n = 0
+    for p in probe_defs.PROBES:
+        kind = p.get("kind", "select")
+        if kind == "select":
+            pairs = [(k, str(x)) for k, v in p["params"].items() for x in (v if isinstance(v, list) else [v])]
+            req = urllib.request.Request(url + "/select", data=urllib.parse.urlencode(pairs).encode())
+            py = search.select(store, pairs)
+        elif kind == "json":
+            req = urllib.request.Request(url + "/query", data=json.dumps(p["body"]).encode(), headers={"Content-Type": "application/json"})
+            py = search.select_json(store, p["body"], [])
+        else:
+            continue
+        with urllib.request.urlopen(req, timeout=60) as r:
+            j = json.loads(r.read())
+        if j["responseHeader"].get("warning"):
+            continue
+        n += 1
+        if essence(j) == essence(py):
+            same += 1
+        else:
+            print("PROBE DIFF", p["name"], json.dumps(essence(j))[:300], "python:", json.dumps(essence(py))[:300])
+    print(f"select and JSON probes identical to Python (incl. start, cursor, facets): {same}/{n}")
 
 
 if __name__ == "__main__":
