@@ -12,7 +12,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use serde_json::{Map, Value};
 use tantivy::schema::{Field, IndexRecordOption, NumericOptions, TextFieldIndexing, TextOptions};
@@ -44,6 +44,69 @@ pub struct Index {
     pub(crate) reader: IndexReader,
     pub(crate) fields: HashMap<String, Indexed>,
     by_key: HashMap<String, usize>,
+    /// Facet columns built so far, by field and keying.
+    facet_columns: Mutex<HashMap<(String, Keying), Arc<FacetColumn>>>,
+}
+
+/// How facet values are told apart.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Keying {
+    /// By Python's `str()` of the value, as `facet.field` counts (`true`/`false` for
+    /// booleans).
+    Text,
+    /// By the JSON value itself, as JSON Facet API `terms` buckets count.
+    Json,
+}
+
+/// The distinct values of one field in every row, so facets count hits without
+/// reading documents.
+#[derive(Debug, Default)]
+pub struct FacetColumn {
+    /// The keys of the distinct values, by value id.
+    pub keys: Vec<String>,
+    /// The first value seen for each key, by value id.
+    pub values: Vec<Value>,
+    /// For each row (by `ord`), the ids of its distinct values.
+    pub rows: Vec<Vec<usize>>,
+}
+
+impl FacetColumn {
+    fn build(schema: &Schema, docs: &[Arc<Value>], field: &str, keying: Keying) -> Self {
+        let empty = Map::new();
+        let mut ids: HashMap<String, usize> = HashMap::new();
+        let mut col = Self::default();
+        for doc in docs {
+            let mut row = Vec::new();
+            for v in schema
+                .values_of(object(doc, &empty), field)
+                .unwrap_or_default()
+            {
+                let key = match keying {
+                    Keying::Text => facet_text(v),
+                    Keying::Json => v.to_string(),
+                };
+                let id = *ids.entry(key).or_insert_with_key(|k| {
+                    col.keys.push(k.clone());
+                    col.values.push(v.clone());
+                    col.keys.len() - 1
+                });
+                if !row.contains(&id) {
+                    row.push(id);
+                }
+            }
+            col.rows.push(row);
+        }
+        col
+    }
+}
+
+/// Python's `str()` of a facet value, with booleans as Solr writes them.
+#[must_use]
+pub fn facet_text(v: &Value) -> String {
+    match v {
+        Value::Bool(b) => b.to_string(),
+        other => crate::query::py_str(other),
+    }
 }
 
 impl Index {
@@ -138,7 +201,19 @@ impl Index {
             reader,
             fields,
             by_key,
+            facet_columns: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// The facet column of `field`, built on first use and kept with this snapshot.
+    pub fn facet_column(&self, field: &str, keying: Keying) -> Arc<FacetColumn> {
+        let mut cache = self
+            .facet_columns
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        Arc::clone(cache.entry((field.to_owned(), keying)).or_insert_with(|| {
+            Arc::new(FacetColumn::build(&self.schema, &self.docs, field, keying))
+        }))
     }
 
     /// The indexed field for a query on `name`.

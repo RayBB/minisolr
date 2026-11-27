@@ -317,6 +317,39 @@ impl Schema {
         }
         out.map_or(Cow::Borrowed(doc), Cow::Owned)
     }
+
+    /// The values `name` has in the copyField-expanded row ([`Schema::effective`]),
+    /// flattened, without building that row: the document's own values, then each
+    /// copyField source's in rule order. `None` when the expanded row has no `name`.
+    /// A top-level `null` contributes no value.
+    #[must_use]
+    pub fn values_of<'a>(&self, doc: &'a Map<String, Value>, name: &str) -> Option<Vec<&'a Value>> {
+        fn push<'a>(v: &'a Value, out: &mut Vec<&'a Value>) {
+            match v {
+                Value::Array(items) => out.extend(items),
+                Value::Null => {}
+                other => out.push(other),
+            }
+        }
+        let mut present = false;
+        let mut out = Vec::new();
+        if let Some(v) = doc.get(name) {
+            present = true;
+            push(v, &mut out);
+        }
+        for (src, _) in self.copy_fields.iter().filter(|(_, dst)| dst == name) {
+            if src.contains('*') {
+                for (_, v) in doc.iter().filter(|(k, _)| glob_match(src, k)) {
+                    present = true;
+                    push(v, &mut out);
+                }
+            } else if let Some(v) = doc.get(src) {
+                present = true;
+                push(v, &mut out);
+            }
+        }
+        present.then_some(out)
+    }
 }
 
 /// Matches `name` against a pattern where `*` stands for any run of characters.
@@ -609,6 +642,14 @@ mod tests {
         assert_eq!(eff.get("title_suggest"), Some(&json!(["old", "Alice"])));
         assert_eq!(eff.get("subject_facet"), Some(&json!(["A", "B"])));
         assert_eq!(eff.get("all_ss"), Some(&json!(["x"])));
+        for name in ["title_suggest", "subject_facet", "all_ss", "key"] {
+            let flat: Vec<&Value> = eff.get(name).map_or_else(Vec::new, |v| match v {
+                Value::Array(items) => items.iter().collect(),
+                other => vec![other],
+            });
+            assert_eq!(s.values_of(map, name), Some(flat), "{name}");
+        }
+        assert_eq!(s.values_of(map, "author_name"), None);
         let plain = json!({"key": "k"});
         assert!(matches!(
             s.effective(plain.as_object().expect("object")),

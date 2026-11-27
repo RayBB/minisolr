@@ -392,14 +392,45 @@ fn subquery(
     }))
 }
 
-/// Python's `str()` of a JSON value: `True`/`False`, `None`, numbers and strings as is.
-fn py_str(v: &Value) -> String {
+/// Python's `str()` of a JSON value: `True`/`False`, `None`, strings as is, integers in
+/// decimal and floats as Python's `repr` writes them.
+#[must_use]
+pub fn py_str(v: &Value) -> String {
     match v {
         Value::String(s) => s.clone(),
         Value::Bool(true) => "True".into(),
         Value::Bool(false) => "False".into(),
         Value::Null => "None".into(),
+        Value::Number(n) if n.is_f64() => n.as_f64().map_or_else(|| n.to_string(), py_float),
         other => other.to_string(),
+    }
+}
+
+/// Python's `repr` of a float: the shortest round-trip digits, positional with at
+/// least one decimal for exponents from -4 to 15, otherwise `1.5e+16` / `1e-05`.
+fn py_float(x: f64) -> String {
+    if !x.is_finite() {
+        return if x.is_nan() {
+            "nan".into()
+        } else if x > 0.0 {
+            "inf".into()
+        } else {
+            "-inf".into()
+        };
+    }
+    let sci = format!("{x:e}");
+    let (mantissa, exp) = sci.split_once('e').unwrap_or((sci.as_str(), "0"));
+    let exp: i32 = exp.parse().unwrap_or(0);
+    if (-4..16).contains(&exp) {
+        let plain = format!("{x}");
+        if plain.contains('.') {
+            plain
+        } else {
+            format!("{plain}.0")
+        }
+    } else {
+        let sign = if exp < 0 { '-' } else { '+' };
+        format!("{mantissa}e{sign}{:02}", exp.unsigned_abs())
     }
 }
 
@@ -798,6 +829,24 @@ mod tests {
             ["/works/OL3W", "/works/OL1W", "/works/OL2W"],
             "enum order, any case direction"
         );
+    }
+
+    #[test]
+    fn py_str_writes_floats_as_python() {
+        for (v, want) in [
+            (json!(1.0), "1.0"),
+            (json!(2.5), "2.5"),
+            (json!(0.0001), "0.0001"),
+            (json!(0.00001), "1e-05"),
+            (json!(1e16), "1e+16"),
+            (json!(1.5e16), "1.5e+16"),
+            (json!(123_456_789_012_345.0), "123456789012345.0"),
+            (json!(-3.25), "-3.25"),
+            (json!(7), "7"),
+            (json!(true), "True"),
+        ] {
+            assert_eq!(py_str(&v), want);
+        }
     }
 
     #[test]
