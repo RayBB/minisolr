@@ -527,3 +527,173 @@ fn list_updater_facets_cursor_and_bad_json() -> TestResult {
     assert_eq!(bad["error"]["code"], 500);
     Ok(())
 }
+
+/// Like [`request`], but also returns the HTTP status code.
+fn request_status(addr: &str, head: &str, body: &str) -> TestResult<(u16, Value)> {
+    let mut stream = TcpStream::connect(addr)?;
+    let msg = format!(
+        "{head}\r\nHost: x\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(msg.as_bytes())?;
+    let mut raw = String::new();
+    stream.read_to_string(&mut raw)?;
+    let status = raw
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .ok_or("no status")?;
+    let (_, json) = raw.split_once("\r\n\r\n").ok_or("no http body")?;
+    Ok((status, serde_json::from_str(json)?))
+}
+
+/// Every route Python minisolr's `app.py` serves, with the methods it accepts.
+#[test]
+fn every_python_route_answers() -> TestResult {
+    let addr = start(Path::new("tests/data/mini.jsonl"))?;
+    let get = |path: &str| request_status(&addr, &format!("GET {path} HTTP/1.1"), "");
+    let post_form = |path: &str, body: &str| {
+        request_status(
+            &addr,
+            &format!("POST {path} HTTP/1.1\r\nContent-Type: application/x-www-form-urlencoded"),
+            body,
+        )
+    };
+    let post_json = |path: &str, body: &str| {
+        request_status(
+            &addr,
+            &format!("POST {path} HTTP/1.1\r\nContent-Type: application/json"),
+            body,
+        )
+    };
+    let core = "/solr/openlibrary";
+
+    for handler in ["select", "query"] {
+        let (status, j) = get(&format!("{core}/{handler}?q=type:work&fl=key&rows=1"))?;
+        assert_eq!((status, j["response"]["numFound"].as_u64()), (200, Some(4)));
+        let (status, j) = post_form(&format!("{core}/{handler}"), "q=type%3Awork&rows=0")?;
+        assert_eq!((status, j["response"]["numFound"].as_u64()), (200, Some(4)));
+        let (status, j) = post_json(
+            &format!("{core}/{handler}"),
+            r#"{"query": "type:work", "limit": 1, "fields": ["key"]}"#,
+        )?;
+        assert_eq!(
+            (status, j["response"]["docs"].as_array().map(Vec::len)),
+            (200, Some(1))
+        );
+    }
+    for (status, j) in [
+        get(&format!("{core}/export?q=type:work&fl=key&rows=1"))?,
+        post_form(&format!("{core}/export"), "q=type%3Awork&fl=key&rows=1")?,
+    ] {
+        assert_eq!(status, 200);
+        assert_eq!(
+            j["response"]["docs"].as_array().map(Vec::len),
+            Some(4),
+            "export ignores rows"
+        );
+    }
+    for (status, j) in [
+        get(&format!("{core}/mlt?q=x"))?,
+        post_form(&format!("{core}/mlt"), "q=x")?,
+    ] {
+        assert_eq!(status, 200);
+        assert_eq!(
+            j,
+            serde_json::json!({"responseHeader": {"status": 0, "QTime": 0}, "response": {"numFound": 0, "start": 0, "docs": []}})
+        );
+    }
+    for (status, j) in [
+        get(&format!("{core}/get?id=/works/OL1W&fl=key"))?,
+        post_form(&format!("{core}/get"), "id=%2Fworks%2FOL1W&fl=key")?,
+    ] {
+        assert_eq!(
+            (status, &j["doc"]["key"]),
+            (200, &Value::from("/works/OL1W"))
+        );
+    }
+    for (i, handler) in ["update", "update/json", "update/json/docs"]
+        .iter()
+        .enumerate()
+    {
+        let body =
+            format!(r#"[{{"key": "/works/OL9{i}W", "type": "work", "title": "Route {i}"}}]"#);
+        let (status, j) = post_json(&format!("{core}/{handler}?commit=true"), &body)?;
+        assert_eq!(
+            (status, &j["responseHeader"]["status"]),
+            (200, &Value::from(0))
+        );
+        let (status, _) = get(&format!("{core}/{handler}"))?;
+        assert_eq!(status, 405, "updates are POST only");
+    }
+    let (status, j) = get(&format!("{core}/admin/ping"))?;
+    assert_eq!((status, &j["status"]), (200, &Value::from("OK")));
+    let (status, j) = get("/solr/admin/cores")?;
+    assert_eq!(status, 200);
+    assert_eq!(j["status"]["openlibrary"]["name"], "openlibrary");
+    assert_eq!(j["status"]["openlibrary"]["index"]["numDocs"], 11);
+    let (status, _) = get(&format!("{core}/nope"))?;
+    assert_eq!(status, 404);
+    Ok(())
+}
+
+/// `/select` with highlighting, spellcheck, and features Python only warns about.
+#[test]
+fn select_highlighting_spellcheck_and_ignored_features() -> TestResult {
+    let addr = start(Path::new("tests/data/mini.jsonl"))?;
+    let get = |path: &str| request_status(&addr, &format!("GET {path} HTTP/1.1"), "");
+    let core = "/solr/openlibrary";
+    let (status, j) = request_status(
+        &addr,
+        &format!("POST {core}/select HTTP/1.1\r\nContent-Type: application/x-www-form-urlencoded"),
+        &form(&[
+            ("q", "alice"),
+            ("fq", "type:work"),
+            ("defType", "edismax"),
+            ("qf", "title"),
+            ("fl", "key"),
+            ("hl", "true"),
+            ("hl.fl", "title,subject"),
+            ("hl.snippets", "3"),
+            ("spellcheck", "true"),
+            ("spellcheck.q", "wonderlnd odysey"),
+        ]),
+    )?;
+    assert_eq!(status, 200);
+    assert_eq!(
+        j["highlighting"],
+        serde_json::json!({"/works/OL2W": {"title": ["<em>Alice's</em> Adventures in Wonderland"]}})
+    );
+    let sug = &j["spellcheck"]["suggestions"];
+    assert_eq!(sug[0], "wonderlnd");
+    assert_eq!(sug[1]["suggestion"], serde_json::json!(["wonderland"]));
+    assert_eq!(sug[2], "odysey");
+    assert_eq!(sug[3]["suggestion"], serde_json::json!(["odyssey"]));
+    assert_eq!(j["spellcheck"]["collations"], serde_json::json!([]));
+
+    // Features Python ignores with a warning on stderr answer normally (mlt=true,
+    // facet.range) or, when the request cannot be answered, return an empty result with a
+    // `warning` in the header; nothing is an error or a crash.
+    let (status, j) = get(&format!("{core}/select?q=type:work&mlt=true&rows=0"))?;
+    assert_eq!((status, j["response"]["numFound"].as_u64()), (200, Some(4)));
+    let (status, j) = get(&format!(
+        "{core}/select?q=type:work&rows=0&facet=true&facet.range=edition_count"
+    ))?;
+    assert_eq!(
+        (status, &j["facet_counts"]["facet_ranges"]),
+        (200, &serde_json::json!({}))
+    );
+    for bad in [
+        "q=nope:x",
+        "q=type:work&group=true",
+        "q={!bad",
+        "q=type:work&json.facet=%7B%7D",
+        "q=x&hl=true&hl.snippets=many",
+    ] {
+        let (status, j) = get(&format!("{core}/select?{bad}"))?;
+        assert_eq!(status, 200, "{bad}");
+        assert_eq!(j["response"]["numFound"], 0, "{bad}");
+        assert!(j["responseHeader"]["warning"].is_string(), "{bad}");
+    }
+    Ok(())
+}
