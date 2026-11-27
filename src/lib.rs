@@ -16,6 +16,7 @@ pub mod porter;
 pub mod query;
 pub mod schema;
 pub mod server;
+pub mod snowball;
 pub mod store;
 pub mod unicode;
 pub mod update;

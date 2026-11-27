@@ -6,7 +6,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use minisolr_rs::Error;
-use minisolr_rs::schema::{Kind, Schema};
+use minisolr_rs::schema::{FieldType, Kind, Schema};
 use minisolr_rs::server::{Core, serve};
 use minisolr_rs::store::Store;
 use serde_json::Value;
@@ -57,52 +57,36 @@ fn run_serve(conf: &str, data: &str, addr: &str) -> Result<(), Error> {
     serve(&Arc::new(Core::new(store, schema)), addr)
 }
 
-/// Compares Rust index-time tokens with Python's, dumped as JSON lines of
-/// `{"field", "value", "main", "extra"}`; prints per-field match rates and mismatches.
-/// Each field's chain comes from the schema; rows for non-text fields are skipped.
+/// Compares Rust tokens with Python's, dumped as JSON lines of `{"field" or "type",
+/// "value", "main", "extra"}` plus an optional `"query"` (the positions with their
+/// alternatives, compared too); prints per-field (or per-type) match rates and the first
+/// mismatches. `field` rows take the chain from the field's type and skip non-text fields.
 fn parity(conf: &str, path: &Path) -> Result<(), Error> {
     let schema = Schema::load(Path::new(conf))?;
     let mut stats: Vec<(String, usize, usize)> = Vec::new();
     let mut shown = 0;
     for line in BufReader::new(std::fs::File::open(path)?).lines() {
         let row: Value = serde_json::from_str(&line?)?;
-        let name = row.get("field").and_then(Value::as_str).unwrap_or_default();
-        let (Some(field), Some(value)) =
-            (schema.get(name), row.get("value").and_then(Value::as_str))
-        else {
+        let text = |key: &str| row.get(key).and_then(Value::as_str);
+        let Some(value) = text("value") else {
             continue;
         };
-        if field.kind != Kind::Text {
-            continue;
-        }
-        let Some(ftype) = schema.field_type(&field) else {
+        let (name, ftype) = if let Some(t) = text("type") {
+            (t, schema.types.get(t))
+        } else {
+            let name = text("field").unwrap_or_default();
+            let ftype = schema
+                .get(name)
+                .filter(|f| f.kind == Kind::Text)
+                .and_then(|f| schema.field_type(&f).cloned());
+            let Some(ftype) = ftype else {
+                continue;
+            };
+            check(&mut stats, &mut shown, name, value, &row, &ftype);
             continue;
         };
-        let strings = |key: &str| -> Vec<String> {
-            row.get(key)
-                .and_then(Value::as_array)
-                .map_or_else(Vec::new, |a| {
-                    a.iter()
-                        .filter_map(|v| v.as_str().map(str::to_owned))
-                        .collect()
-                })
-        };
-        let want = (strings("main"), strings("extra"));
-        let got = ftype.index.index(value);
-        let ok = (got.main.clone(), got.extra.clone()) == want;
-        match stats.iter_mut().find(|(n, ..)| n == name) {
-            Some(entry) => {
-                entry.1 += 1;
-                entry.2 += usize::from(ok);
-            }
-            None => stats.push((name.to_owned(), 1, usize::from(ok))),
-        }
-        if !ok && shown < 40 {
-            shown += 1;
-            println!(
-                "MISMATCH {name} {value:?}\n  python: {:?} + {:?}\n  rust:   {:?} + {:?}",
-                want.0, want.1, got.main, got.extra
-            );
+        if let Some(ftype) = ftype {
+            check(&mut stats, &mut shown, name, value, &row, ftype);
         }
     }
     let (total, matched) = stats
@@ -113,6 +97,49 @@ fn parity(conf: &str, path: &Path) -> Result<(), Error> {
     }
     println!("all: {matched}/{total}");
     Ok(())
+}
+
+fn check(
+    stats: &mut Vec<(String, usize, usize)>,
+    shown: &mut usize,
+    name: &str,
+    value: &str,
+    row: &Value,
+    ftype: &FieldType,
+) {
+    let strings = |v: &Value| -> Vec<String> {
+        v.as_array().map_or_else(Vec::new, |a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect()
+        })
+    };
+    let field = |key: &str| strings(row.get(key).unwrap_or(&Value::Null));
+    let want = (field("main"), field("extra"));
+    let got = ftype.index.index(value);
+    let mut ok = (got.main.clone(), got.extra.clone()) == want;
+    let want_query: Option<Vec<Vec<String>>> = row
+        .get("query")
+        .and_then(Value::as_array)
+        .map(|positions| positions.iter().map(strings).collect());
+    let got_query = ftype.query.query(value);
+    if let Some(q) = &want_query {
+        ok &= *q == got_query;
+    }
+    match stats.iter_mut().find(|(n, ..)| n == name) {
+        Some(entry) => {
+            entry.1 += 1;
+            entry.2 += usize::from(ok);
+        }
+        None => stats.push((name.to_owned(), 1, usize::from(ok))),
+    }
+    if !ok && *shown < 60 {
+        *shown += 1;
+        println!(
+            "MISMATCH {name} {value:?}\n  python: {:?} + {:?} query {:?}\n  rust:   {:?} + {:?} query {:?}",
+            want.0, want.1, want_query, got.main, got.extra, got_query
+        );
+    }
 }
 
 fn percent(part: usize, whole: usize) -> f64 {

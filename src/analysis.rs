@@ -6,7 +6,7 @@
 //! position). Tokenizers: `whitespace`, `keyword`, and the standard tokenizer for every
 //! other name (as Python, which has no Japanese, Korean, Thai or path tokenizers).
 //! Filters: `lowercase`, `stop`, `icuFolding`, `wordDelimiterGraph`, `porterStem`,
-//! `englishPossessive`, `englishMinimalStem`, `keywordMarker`, `synonymGraph` and
+//! `snowballPorter` (Snowball English for every language, as Python), `englishPossessive`, `englishMinimalStem`, `keywordMarker`, `synonymGraph` and
 //! `removeDuplicates`; any other filter is skipped and reported by [`Analyzer::build`]
 //! (Python skips them silently). Word lists come from the files the filters name, relative
 //! to the conf directory ([`Resources`]); a missing file is an empty list, as in Python.
@@ -20,8 +20,8 @@ use std::path::{Path, PathBuf};
 
 use unicode_normalization::UnicodeNormalization;
 
-use crate::porter;
 use crate::unicode::{self, Class};
+use crate::{porter, snowball};
 
 /// One token, with the keyword flag `keywordMarker` sets (stemmers leave keywords alone).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -139,6 +139,7 @@ enum Filter {
         words: HashSet<String>,
     },
     Porter,
+    Snowball,
     MinimalStem,
     RemoveDuplicates,
     Synonyms(Synonyms),
@@ -209,6 +210,8 @@ impl Analyzer {
                     }
                 }
                 "porterstem" => Filter::Porter,
+                // Python stems with Snowball English whatever the `language` attribute says.
+                "snowballporter" => Filter::Snowball,
                 "englishminimalstem" => Filter::MinimalStem,
                 "removeduplicates" => Filter::RemoveDuplicates,
                 "synonymgraph" => Filter::Synonyms(Synonyms::new(f, res)),
@@ -341,6 +344,13 @@ impl Filter {
                     t
                 } else {
                     Tok::new(porter::stem(&t.text), false)
+                })
+            }),
+            Self::Snowball => per_token(stream, |t| {
+                Some(if t.kw {
+                    t
+                } else {
+                    Tok::new(snowball::stem(&t.text), false)
                 })
             }),
             Self::MinimalStem => per_token(stream, |t| {
