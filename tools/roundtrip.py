@@ -15,7 +15,7 @@ repeated `add` key per document and a final `commit`, so a JSON parser that coll
 would keep only the last document of each batch. The target should start empty.
 
 `compare` replays the captured selects (as tools/replay.py picks them) and gets on both servers and
-counts responses whose `numFound` and full `docs` list (order included) are identical, then compares
+counts responses whose `numFound`, full `docs` list (order included) and `facet_counts` are identical, then compares
 every row returned by `/export?q=*:*&fl=*`.
 """
 
@@ -74,11 +74,12 @@ def compare(a: str, b: str, fixtures: Path) -> None:
         ja, jb = post(a, params), post(b, params)
         total += 1
         ra, rb = ja.get("response", {}), jb.get("response", {})
-        if ra.get("numFound") == rb.get("numFound") and ra.get("docs") == rb.get("docs") and ja.get("responseHeader", {}).get("warning") == jb.get("responseHeader", {}).get("warning"):
+        same_facets = ja.get("facet_counts") == jb.get("facet_counts")
+        if same_facets and ra.get("numFound") == rb.get("numFound") and ra.get("docs") == rb.get("docs") and ja.get("responseHeader", {}).get("warning") == jb.get("responseHeader", {}).get("warning"):
             same += 1
         else:
             print("  SELECT DIFFERS", dict(r["params"]).get("ol.label"), (dict(r["params"]).get("q") or "")[:80])
-    print(f"selects identical (numFound, docs in order, warning): {same}/{total}")
+    print(f"selects identical (numFound, docs in order, facet_counts, warning): {same}/{total}")
     gets = list({json.dumps(r["params"]): r for r in reqs if r["path"] == "/get"}.values())
     same = sum(post(a, [(k, v) for k, v in r["params"]], "/get") == post(b, [(k, v) for k, v in r["params"]], "/get") for r in gets)
     print(f"gets identical: {same}/{len(gets)}")

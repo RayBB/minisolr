@@ -196,6 +196,11 @@ def probe_essence(p: dict[str, Any], j: dict[str, Any]) -> dict[str, Any]:
         out["json_facets"] = j["facets"]
     if "nextCursorMark" in j:
         out["cursor_advances"] = j["nextCursorMark"] != "*"
+    if "highlighting" in j:
+        out["highlighting"] = j["highlighting"]
+    if "spellcheck" in j:
+        sug = j["spellcheck"].get("suggestions", [])
+        out["spellcheck"] = [sug[i] for i in range(0, len(sug) - 1, 2) if isinstance(sug[i + 1], dict)]
     return out
 
 
@@ -279,6 +284,10 @@ def probes(base: str, fixtures: Path, verbose: bool) -> None:
         for k in ("facet_fields", "facet_queries", "json_facets", "cursor_advances"):
             if k in g and g[k] != r.get(k):
                 bad.append(f"{k} differ: {json.dumps(r.get(k))[:200]}")
+        if "highlighting" in g and set(g["highlighting"]) != set(r.get("highlighting", {})):
+            bad.append(f"highlight docs {sorted(g['highlighting'])} != {sorted(r.get('highlighting', {}))}")
+        if "spellcheck" in g and [w for w, _ in g["spellcheck"]] != r.get("spellcheck", []):
+            bad.append(f"spellcheck terms differ: {r.get('spellcheck')}")
         if bad:
             fails.append(f"{p['name']}: " + "; ".join(bad))
         else:
