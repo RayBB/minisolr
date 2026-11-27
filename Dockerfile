@@ -15,6 +15,9 @@ COPY src src
 RUN touch src/lib.rs src/main.rs && cargo build --release --locked
 
 FROM scratch
+LABEL org.opencontainers.image.source="https://github.com/RayBB/minisolr-rs" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.description="Solr-compatible search server for local Open Library development (Rust, Tantivy, scratch image)"
 COPY --from=build /src/target/release/minisolr-rs /minisolr-rs
 EXPOSE 8983
 HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --start-interval=1s CMD ["/minisolr-rs", "ping"]

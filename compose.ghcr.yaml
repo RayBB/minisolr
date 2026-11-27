@@ -1,0 +1,25 @@
+# Compose override that replaces Open Library's `solr` service with the published minisolr-rs image (dev only).
+# No clone and no local build: download this one file and add it to Open Library's compose files.
+#   curl -O https://raw.githubusercontent.com/RayBB/minisolr-rs/main/compose.ghcr.yaml
+#   docker compose -f compose.yaml -f compose.override.yaml -f compose.ghcr.yaml up
+# Pin a version with MINISOLR_IMAGE_TAG (default: latest).
+services:
+  solr:
+    image: ghcr.io/raybb/minisolr-rs:${MINISOLR_IMAGE_TAG:-latest}
+    command: !reset null
+    # The image has no init; docker-init forwards SIGTERM so stop and restart are immediate.
+    # Every update request is saved (fsync, then rename) before it is answered, so a stop never loses committed data.
+    init: true
+    environment: !reset []
+    volumes: !override
+      - ./conf/solr/conf:/conf:ro
+      - minisolr-rs-data:/data
+    healthcheck: !override
+      test: ["CMD", "/minisolr-rs", "ping"]
+      interval: 10s
+      timeout: 5s
+      start_period: 30s
+      start_interval: 1s
+      retries: 6
+volumes:
+  minisolr-rs-data:

@@ -15,6 +15,25 @@ cargo test --release
 
 The first argument is a Solr conf directory with `managed-schema.xml` (and optionally `enumsConfig.xml`). The second is the data directory (created if missing): the store is loaded from `<dir>/docs.jsonl` and saved there after every update request that changes something, in the same format as Python minisolr, so either server can open the other's directory. Given a `.jsonl` file instead, the server loads it and keeps updates in memory only. `minisolr-rs ping [addr]` exits 0 when the server at `addr` (default `127.0.0.1:8983`) answers `/solr/openlibrary/admin/ping`; the image uses it as its healthcheck.
 
+## Pull the published image
+
+Every push to `main` builds a multi-architecture (amd64 and arm64) image and publishes it to GitHub Container Registry; a release tag such as `v1.2.3` adds version tags.
+
+```bash
+docker pull ghcr.io/raybb/minisolr-rs:latest
+```
+
+To run Open Library's dev stack on it with no clone and no local build, download one compose file and use it as the `solr` override (needs Docker Compose 2.24 or newer):
+
+```bash
+cd ~/workspace/openlibrary
+curl -O https://raw.githubusercontent.com/RayBB/minisolr-rs/main/compose.ghcr.yaml
+docker compose -f compose.yaml -f compose.override.yaml -f compose.ghcr.yaml up -d
+docker compose -f compose.yaml -f compose.override.yaml -f compose.ghcr.yaml run --rm home make reindex-solr
+```
+
+To make plain `docker compose up` use it, put `COMPOSE_FILE=compose.yaml:compose.override.yaml:compose.ghcr.yaml` in Open Library's git-ignored `.env`. Tags: `latest` (the `main` branch), `x.y.z` and `x.y` (releases), `sha-<commit>`. Pin one with `MINISOLR_IMAGE_TAG`. The image is built by `.github/workflows/docker.yml` and is MIT licensed like the code.
+
 ## Docker and Open Library's dev stack
 
 The `Dockerfile` builds a static musl binary in `rust:1-alpine` (two compile jobs, dependencies in their own cached layer) and copies it into a `scratch` image of about 8 MB. The container reads the schema from `/conf`, keeps its documents in `/data/docs.jsonl` and listens on port 8983.
