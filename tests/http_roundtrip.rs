@@ -388,3 +388,144 @@ fn update_lifecycle_and_restart_from_the_data_directory() -> TestResult {
     std::fs::remove_dir_all(&dir)?;
     Ok(())
 }
+
+/// A server on the mini data with reading-log, ratings and subject facet values on
+/// Lewis Carroll's two works.
+fn start_with_author_fields() -> TestResult<String> {
+    let addr = start(Path::new("tests/data/mini.jsonl"))?;
+    let updated = request(
+        &addr,
+        "POST /solr/openlibrary/update?commit=true HTTP/1.1\r\nContent-Type: application/json",
+        r#"[{"key": "/works/OL2W", "ratings_count_1": {"set": 1}, "ratings_count_5": {"set": 3}, "readinglog_count": {"set": 10}, "want_to_read_count": {"set": 6}, "subject": {"set": ["Fantasy", "Fiction"]}, "time_facet": {"set": ["19th century"]}},
+            {"key": "/works/OL3W", "ratings_count_5": {"set": 2}, "readinglog_count": {"set": 4}, "want_to_read_count": {"set": 4}, "subject": {"set": ["Fiction"]}, "person_facet": {"set": ["Alice"]}}]"#,
+    )?;
+    assert_eq!(
+        updated.pointer("/responseHeader/status"),
+        Some(&Value::from(0)),
+        "{updated}"
+    );
+    Ok(addr)
+}
+
+/// The JSON Request API body Open Library's author updater sends
+/// (`openlibrary/solr/updater/author.py`), and the response keys it reads.
+#[test]
+fn author_updater_json_request() -> TestResult {
+    let addr = start_with_author_fields()?;
+    let mut facet = serde_json::json!({
+        "ratings_count_1": "sum(ratings_count_1)",
+        "ratings_count_2": "sum(ratings_count_2)",
+        "ratings_count_3": "sum(ratings_count_3)",
+        "ratings_count_4": "sum(ratings_count_4)",
+        "ratings_count_5": "sum(ratings_count_5)",
+        "readinglog_count": "sum(readinglog_count)",
+        "want_to_read_count": "sum(want_to_read_count)",
+        "currently_reading_count": "sum(currently_reading_count)",
+        "already_read_count": "sum(already_read_count)",
+        "stopped_reading_count": "sum(stopped_reading_count)",
+    });
+    let subject_facets = ["subject_facet", "time_facet", "person_facet", "place_facet"];
+    for field in subject_facets {
+        facet[field] = serde_json::json!({"type": "terms", "field": field});
+    }
+    let body = serde_json::json!({
+        "params": {
+            "json.nl": "arrarr",
+            "q": "author_key:OL2A ",
+            "fq": "type:work",
+            "fl": "title, subtitle",
+            "sort": "edition_count desc",
+        },
+        "facet": facet,
+    })
+    .to_string();
+    for handler in ["query", "select"] {
+        let reply = request(
+            &addr,
+            &format!("POST /solr/openlibrary/{handler} HTTP/1.1\r\nContent-Type: application/json"),
+            &body,
+        )?;
+        assert!(reply["responseHeader"].get("warning").is_none(), "{reply}");
+        // work_count and top_work
+        assert_eq!(reply["response"]["numFound"], 2);
+        assert_eq!(
+            reply["response"]["docs"][0],
+            serde_json::json!({"title": "Alice's Adventures in Wonderland"})
+        );
+        let f = &reply["facets"];
+        assert_eq!(f["count"], 2);
+        // build_ratings and build_reading_log read these with defaults
+        assert_eq!(f["ratings_count_1"].as_f64(), Some(1.0));
+        assert_eq!(f["ratings_count_5"].as_f64(), Some(5.0));
+        assert_eq!(f["ratings_count_2"].as_f64(), Some(0.0));
+        assert_eq!(f["readinglog_count"].as_f64(), Some(14.0));
+        assert_eq!(f["want_to_read_count"].as_f64(), Some(10.0));
+        assert_eq!(f["stopped_reading_count"].as_f64(), Some(0.0));
+        // top_subjects: (count, val) of every bucket, highest first
+        let mut subjects: Vec<(u64, String)> = Vec::new();
+        for field in subject_facets {
+            let buckets = f[field]["buckets"].as_array().ok_or("buckets")?;
+            for b in buckets {
+                subjects.push((
+                    b["count"].as_u64().ok_or("count")?,
+                    b["val"].as_str().ok_or("val")?.to_owned(),
+                ));
+            }
+        }
+        subjects.sort_unstable_by(|a, b| b.cmp(a));
+        let top: Vec<&str> = subjects.iter().map(|(_, s)| s.as_str()).collect();
+        assert_eq!(top, ["Fiction", "Fantasy", "Alice", "19th century"]);
+        assert_eq!(f["place_facet"], serde_json::json!({"buckets": []}));
+    }
+    Ok(())
+}
+
+/// The list updater's classic facet request, `cursorMark` paging and a malformed JSON
+/// body.
+#[test]
+fn list_updater_facets_cursor_and_bad_json() -> TestResult {
+    let addr = start_with_author_fields()?;
+    let list = request(
+        &addr,
+        "POST /solr/openlibrary/select HTTP/1.1\r\nContent-Type: application/x-www-form-urlencoded",
+        &form(&[
+            ("wt", "json"),
+            ("json.nl", "arrarr"),
+            ("q", "key:( \"/works/OL2W\" OR \"/works/OL3W\" )"),
+            ("fq", "type:work"),
+            ("rows", "0"),
+            ("facet", "true"),
+            ("facet.mincount", "1"),
+            ("facet.limit", "50"),
+            ("facet.field", "subject_facet"),
+            ("facet.field", "person_facet"),
+            ("facet.field", "place_facet"),
+        ]),
+    )?;
+    assert_eq!(
+        list["facet_counts"]["facet_fields"],
+        serde_json::json!({"subject_facet": [["Fiction", 2], ["Fantasy", 1]], "person_facet": [["Alice", 1]], "place_facet": []})
+    );
+
+    let cursor = request(
+        &addr,
+        "GET /solr/openlibrary/select?q=type:work&sort=key+asc&rows=3&fl=key&cursorMark=* HTTP/1.1",
+        "",
+    )?;
+    assert_eq!(cursor["nextCursorMark"], "o:3");
+    let next = request(
+        &addr,
+        "GET /solr/openlibrary/select?q=type:work&sort=key+asc&rows=3&fl=key&cursorMark=o:3 HTTP/1.1",
+        "",
+    )?;
+    assert_eq!(keys(&next), ["/works/OL4W"]);
+    assert_eq!(next["nextCursorMark"], "o:4");
+
+    let bad = request(
+        &addr,
+        "POST /solr/openlibrary/query HTTP/1.1\r\nContent-Type: application/json",
+        "{not json",
+    )?;
+    assert_eq!(bad["error"]["code"], 500);
+    Ok(())
+}

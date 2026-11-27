@@ -72,6 +72,19 @@
   <field name="ia" type="string" multiValued="true"/>
   <field name="cover_i" type="pint"/>
   <field name="publisher" type="text_general" multiValued="true"/>
+  <field name="ratings_count_1" type="pint"/>
+  <field name="ratings_count_2" type="pint"/>
+  <field name="ratings_count_3" type="pint"/>
+  <field name="ratings_count_4" type="pint"/>
+  <field name="ratings_count_5" type="pint"/>
+  <field name="readinglog_count" type="pint"/>
+  <field name="want_to_read_count" type="pint"/>
+  <field name="currently_reading_count" type="pint"/>
+  <field name="already_read_count" type="pint"/>
+  <field name="stopped_reading_count" type="pint"/>
+  <field name="time_facet" type="string" multiValued="true"/>
+  <field name="person_facet" type="string" multiValued="true"/>
+  <field name="place_facet" type="string" multiValued="true"/>
   <dynamicField name="*_s" type="string" indexed="true" stored="true"/>
   <dynamicField name="*_i" type="pint" indexed="true" stored="true"/>
   <copyField source="subject" dest="subject_facet"/>
