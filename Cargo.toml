@@ -16,6 +16,7 @@ roxmltree = "0.20"
 
 [lints.rust]
 unsafe_code = "forbid"
+unknown_lints = "allow"
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
@@ -23,6 +24,8 @@ unwrap_used = "warn"
 expect_used = "warn"
 panic = "warn"
 indexing_slicing = "warn"
+# newer clippy flags `assert!(x.is_empty())` in tests; the plain form reads fine
+assert_is_empty = "allow"
 
 [profile.release]
 opt-level = 2
