@@ -26,7 +26,7 @@ cargo test --release
 python3 tools/check.py   # replay the captured Open Library requests and the 82 probes; the CI gate
 ```
 
-The first argument is a Solr conf directory with `managed-schema.xml` (and optionally `enumsConfig.xml`). The second is the data directory (created if missing): the store is loaded from `<dir>/docs.jsonl` and saved there after every update request that changes something, in the same format as Python minisolr, so either server can open the other's directory. Given a `.jsonl` file instead, the server loads it and keeps updates in memory only. `minisolr ping [addr]` exits 0 when the server at `addr` (default `127.0.0.1:8983`) answers `/solr/openlibrary/admin/ping`; the image uses it as its healthcheck.
+The first argument is a Solr conf directory with `managed-schema.xml` (and optionally `enumsConfig.xml`). The second is the data directory (created if missing): the store is loaded from the snapshot `<dir>/docs.jsonl` (one JSON row per line, the format Python minisolr used) plus the write-ahead log `<dir>/docs.wal`. Each update request that changes something appends one line to the log and syncs it before the response, so a committed update survives `kill -9`; a torn last line is ignored on start. The log is folded into a fresh snapshot (written to `docs.tmp`, renamed, then the log is emptied) at start-up and whenever it outgrows the snapshot (between 1 and 64 MiB), so `docs.jsonl` alone can lag behind the directory's contents. A directory with only `docs.jsonl` loads as it is. Given a `.jsonl` file instead, the server loads it and keeps updates in memory only. `minisolr ping [addr]` exits 0 when the server at `addr` (default `127.0.0.1:8983`) answers `/solr/openlibrary/admin/ping`; the image uses it as its healthcheck.
 
 ## Pull the published image
 
@@ -92,7 +92,7 @@ python3 tools/gen_unicode.py > src/unicode/table.rs
 
 ## Store, updates and concurrency
 
-The store (`src/store.rs`) is the source of truth, as in Python: documents in insertion order keyed by the uniqueKey, nested `editions` / `_childDocuments_` children as separate rows with `_root_` and `_nest_path_ = /editions#i`, and a version that moves on every change. The Tantivy index (`src/index.rs`) is a derived snapshot, rebuilt by the first search after the version moves on. Up to four worker threads serve requests; an update holds the store's write lock for the whole request and saves before releasing it (Python saves on every update request, so nothing is lost on a kill), while searches only take an `Arc` of the current snapshot; one thread rebuilds it outside the store lock while the others wait for that version.
+The store (`src/store.rs`) is the source of truth, as in Python: documents in insertion order keyed by the uniqueKey, nested `editions` / `_childDocuments_` children as separate rows with `_root_` and `_nest_path_ = /editions#i`, and a version that moves on every change. The Tantivy index (`src/index.rs`) is a derived snapshot, rebuilt by the first search after the version moves on. Up to four worker threads serve requests; an update holds the store's write lock for the whole request and appends its changes to the log before releasing it, while searches only take an `Arc` of the current snapshot; one thread rebuilds it outside the store lock while the others wait for that version.
 
 ## What it supports
 
@@ -185,7 +185,19 @@ Correctness on the captured Open Library requests (`tools/replay.py`): all 267 a
 
 ## Limits
 
-As in Python: MoreLikeThis returns nothing (`/mlt` is empty, `mlt=true` is ignored), highlighting returns whole values rather than fragments, spellcheck has no collations, analyzer components Python lacks are skipped, and JSON facets stop at `sum` and `terms` (no nested facets, `avg`, `min`, `max`, `unique`); the whole store file is rewritten on every update request and the index is rebuilt in full after a change. Unlike Python, a field the schema does not define is an error, as in real Solr (checked against Solr 10.1 with `e2e/probes.py`): HTTP 400 with `error.msg` `undefined field nosuch` for a query clause (`q`, `fq`, `df`, wildcards, `{!terms}`, facet queries, `delete` by query), `undefined field: \"nosuch\"` for a range, `{!field}`, `{!prefix}`, `facet.field` and JSON facets, `sort param field can't be found: nosuch` for `sort`, and `Query Field 'nosuch' is not a valid field name` for an edismax `qf`. Python logs a warning and treats just that clause as matching nothing. Edismax still reads `nosuch:foo` as text, ignores an undefined `pf` field and a range on one, and `fl` ignores unknown names, all as Solr does. Unlike Solr, a failing facet or highlighting request carries no partial `response`, and an undefined field inside `bf`, `boost` or a sort function is not rejected. Other features Python only warns about (a bare term with no default field, a range on a text field, an unknown `{!type}`) still return an empty result with a `warning`.
+As in Python: MoreLikeThis returns nothing (`/mlt` is empty, `mlt=true` is ignored), highlighting returns whole values rather than fragments, spellcheck has no collations, analyzer components Python lacks are skipped, and JSON facets stop at `sum` and `terms` (no nested facets, `avg`, `min`, `max`, `unique`); the index is rebuilt in full by the first search after a change, and an update scans every row to find a document's children. Unlike Python, a field the schema does not define is an error, as in real Solr (checked against Solr 10.1 with `e2e/probes.py`): HTTP 400 with `error.msg` `undefined field nosuch` for a query clause (`q`, `fq`, `df`, wildcards, `{!terms}`, facet queries, `delete` by query), `undefined field: \"nosuch\"` for a range, `{!field}`, `{!prefix}`, `facet.field` and JSON facets, `sort param field can't be found: nosuch` for `sort`, and `Query Field 'nosuch' is not a valid field name` for an edismax `qf`. Python logs a warning and treats just that clause as matching nothing. Edismax still reads `nosuch:foo` as text, ignores an undefined `pf` field and a range on one, and `fl` ignores unknown names, all as Solr does. Unlike Solr, a failing facet or highlighting request carries no partial `response`, and an undefined field inside `bf`, `boost` or a sort function is not rejected. Other features Python only warns about (a bare term with no default field, a range on a text field, an unknown `{!type}`) still return an empty result with a `warning`.
+
+Data size. Measured with `tools/gen_docs.py` (synthetic rows cloned from the fixtures) and `tools/bench_store.py` on a loaded Apple Silicon Mac, release build; updates are one-document requests with `commit=true`.
+
+| | 10,000 rows (6.9 MB) | 50,000 rows (34 MB) |
+|---|---|---|
+| start until the ping answers | 0.04-0.1 s | 0.2-0.6 s |
+| RSS after the first search | 80-95 MiB | 190-250 MiB |
+| first search (index build), and after any update | 0.35-0.45 s | 1.8-2.0 s |
+| one update request | 63 ms before the log, 15 ms now | 250-300 ms before, 25 ms now |
+| 50 update requests in a row | 1.4 s before, 0.85 s now | 15.7-16 s before, 0.6-0.8 s now |
+
+Updates no longer rewrite the store; what remains per update is the sync of the log. The index is still rebuilt in full by the first search after a change (an incremental update would have to renumber rows and add dynamic fields), which is the cost that grows with the data: a reindex that sends many small update requests with searches in between pays it each time, so send big batches. Tens of thousands of rows work; a few hundred thousand would want incremental indexing.
 
 ## Credits and license
 

@@ -3,7 +3,7 @@
 //!
 //! A few worker threads take requests from one listener. The store sits behind an
 //! `RwLock`; updates hold the write lock for a whole request (as Python holds its store
-//! lock) and save the store before releasing it. Searches never hold the store lock
+//! lock) and log their changes before releasing it. Searches never hold the store lock
 //! while they run: they take an `Arc` of the current index snapshot, rebuilt lazily
 //! (by one thread at a time, outside the store lock) when the store version has moved
 //! on. Lock order is store, then cache; the cache lock is only held to swap the `Arc`.
@@ -189,9 +189,9 @@ impl Core {
         let outcome = update::apply(&mut store, body, params, &mut delete_query);
         self.version.store(store.version, Ordering::Release);
         if outcome.save
-            && let Err(e) = store.save()
+            && let Err(e) = store.persist()
         {
-            eprintln!("error: could not save the store: {e}");
+            eprintln!("error: could not log the update: {e}");
             return (
                 400,
                 json!({"responseHeader": {"status": 400}, "error": {"msg": format!("OSError: {e}"), "code": 400}}),

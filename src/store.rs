@@ -3,13 +3,22 @@
 //! Mirrors Python minisolr's `Store`: documents keyed by the uniqueKey in insertion order
 //! (a re-added document moves to the end, an updated one keeps its place), nested
 //! children as separate rows carrying `_root_` and `_nest_path_`, atomic updates, and a
-//! version that moves on every change so the derived index can be rebuilt lazily. The
-//! file is `<data dir>/docs.jsonl`, one JSON object per line, written to `docs.tmp` and
-//! renamed, so Python minisolr and this server can read each other's data directories.
+//! version that moves on every change so the derived index can be rebuilt lazily.
+//!
+//! A data directory holds a snapshot, `docs.jsonl` (one JSON object per line, the format
+//! Python minisolr used), and a write-ahead log, `docs.wal`. Each update request appends
+//! one line to the log, with the rows it put and the keys it removed, and syncs it before
+//! the request is answered. Opening loads the snapshot and replays the log; a torn last
+//! line (a crash in mid-write) is dropped. When the log grows past a threshold, or at
+//! open if it is already past it, a new snapshot is written to `docs.tmp`, renamed over
+//! `docs.jsonl`, and the log is emptied. Log records are absolute (the row as stored, or
+//! a removal), so replaying one over a snapshot that already holds it, as after a crash
+//! between the rename and the emptying, gives the same rows in the same order. A
+//! directory with only `docs.jsonl` loads as it always did.
 
 use std::collections::HashMap;
 use std::fmt;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -42,43 +51,167 @@ impl fmt::Display for UpdateError {
     }
 }
 
+/// The log is compacted once it is longer than the snapshot, but not before it holds
+/// [`MIN_WAL`] bytes and never later than [`MAX_WAL`].
+const MIN_WAL: u64 = 1 << 20;
+const MAX_WAL: u64 = 64 << 20;
+
+/// A change to the rows, as logged.
+enum Op {
+    Put(String, Arc<Value>),
+    Remove(String),
+}
+
+/// The files of a data directory and what is known about them.
+struct Disk {
+    dir: PathBuf,
+    /// Bytes in the snapshot file.
+    snapshot_len: u64,
+    /// The log, once it exists.
+    wal: Option<File>,
+    wal_len: u64,
+}
+
+impl Disk {
+    fn snapshot_path(&self) -> PathBuf {
+        self.dir.join("docs.jsonl")
+    }
+
+    fn wal_path(&self) -> PathBuf {
+        self.dir.join("docs.wal")
+    }
+
+    fn compaction_threshold(&self) -> u64 {
+        self.snapshot_len.clamp(MIN_WAL, MAX_WAL)
+    }
+}
+
+/// Syncs a directory so a rename in it survives a crash (best effort: not every
+/// platform can open a directory).
+fn sync_dir(dir: &Path) {
+    if let Ok(d) = File::open(dir) {
+        let _ = d.sync_all();
+    }
+}
+
 /// Documents in insertion order, keyed by the uniqueKey.
 pub struct Store {
     schema: Arc<Schema>,
     /// Rows in order; a deleted row leaves `None` until the next compaction.
     slots: Vec<Option<(String, Arc<Value>)>>,
     by_key: HashMap<String, usize>,
-    path: Option<PathBuf>,
+    disk: Option<Disk>,
+    /// Changes since the last [`Store::persist`]; only kept for a persistent store.
+    pending: Vec<Op>,
     /// Moves on every change.
     pub version: u64,
 }
 
 impl Store {
-    /// An empty store; with a data directory, documents persist in `<dir>/docs.jsonl`.
+    /// An empty store; with a data directory, updates persist there once
+    /// [`Store::persist`] is called (use [`Store::open`] to load what is there).
     #[must_use]
     pub fn new(schema: Arc<Schema>, data_dir: Option<&Path>) -> Self {
         Self {
             schema,
             slots: Vec::new(),
             by_key: HashMap::new(),
-            path: data_dir.map(|d| d.join("docs.jsonl")),
+            disk: data_dir.map(|dir| Disk {
+                dir: dir.to_path_buf(),
+                snapshot_len: 0,
+                wal: None,
+                wal_len: 0,
+            }),
+            pending: Vec::new(),
             version: 0,
         }
     }
 
-    /// Opens a data directory: loads `<dir>/docs.jsonl` when it exists.
+    /// Opens a data directory: loads the snapshot `<dir>/docs.jsonl` when it exists, then
+    /// replays `<dir>/docs.wal`, and compacts if the log is already past its threshold.
     ///
     /// # Errors
-    /// Fails if the file cannot be read, a line is not a JSON object, or a row has no
-    /// uniqueKey.
+    /// Fails if a file cannot be read, a snapshot line is not a JSON object, a row has no
+    /// uniqueKey, or the log is corrupt before its last line.
     pub fn open(schema: Arc<Schema>, data_dir: &Path) -> Result<Self, Error> {
         let mut store = Self::new(schema, Some(data_dir));
-        if let Some(path) = store.path.clone()
-            && path.exists()
+        let snapshot = data_dir.join("docs.jsonl");
+        if snapshot.exists() {
+            store.load_file(&snapshot)?;
+            if let Some(disk) = &mut store.disk {
+                disk.snapshot_len = std::fs::metadata(&snapshot)?.len();
+            }
+        }
+        store.replay_wal()?;
+        if let Some(disk) = &store.disk
+            && disk.wal_len > disk.compaction_threshold()
         {
-            store.load_file(&path)?;
+            store.compact()?;
         }
         Ok(store)
+    }
+
+    /// Replays the log over the loaded snapshot and keeps it open for appends; a torn
+    /// last line is cut off.
+    fn replay_wal(&mut self) -> Result<(), Error> {
+        let Some(disk) = &self.disk else {
+            return Ok(());
+        };
+        let path = disk.wal_path();
+        let Ok(file) = OpenOptions::new().read(true).append(true).open(&path) else {
+            return Ok(());
+        };
+        let mut reader = BufReader::new(&file);
+        let mut line = Vec::new();
+        let mut good = 0u64;
+        let mut ops: Vec<Vec<Op>> = Vec::new();
+        loop {
+            line.clear();
+            let n = reader.read_until(b'\n', &mut line)?;
+            if n == 0 {
+                break;
+            }
+            let parsed = line
+                .ends_with(b"\n")
+                .then(|| serde_json::from_slice::<Value>(&line).ok())
+                .flatten();
+            let Some(record) = parsed else {
+                if reader.fill_buf()?.is_empty() {
+                    break;
+                }
+                return Err(Error::Other(format!(
+                    "{}: corrupt log line at byte {good}",
+                    path.display()
+                )));
+            };
+            ops.push(parse_ops(&record).ok_or_else(|| {
+                Error::Other(format!("{}: bad log record at byte {good}", path.display()))
+            })?);
+            good += n as u64;
+        }
+        drop(reader);
+        if good < file.metadata()?.len() {
+            eprintln!(
+                "{}: dropping a torn last line ({} bytes)",
+                path.display(),
+                file.metadata()?.len() - good
+            );
+            file.set_len(good)?;
+            file.sync_all()?;
+        }
+        for op in ops.into_iter().flatten() {
+            match op {
+                Op::Put(key, row) => self.put_arc(key, row),
+                Op::Remove(key) => self.remove(&key),
+            }
+        }
+        self.pending.clear();
+        self.version += 1;
+        if let Some(disk) = &mut self.disk {
+            disk.wal = Some(file);
+            disk.wal_len = good;
+        }
+        Ok(())
     }
 
     /// Adds the rows of a JSON-lines file as they are (no `_root_` is added), later rows
@@ -105,7 +238,7 @@ impl Store {
                         self.schema.unique_key
                     ))
                 })?;
-            self.put(key, row);
+            self.put_arc(key, Arc::new(row));
         }
         self.version += 1;
         Ok(())
@@ -126,7 +259,7 @@ impl Store {
     /// Whether updates are written to disk.
     #[must_use]
     pub fn persistent(&self) -> bool {
-        self.path.is_some()
+        self.disk.is_some()
     }
 
     /// The row stored under `key`.
@@ -149,24 +282,35 @@ impl Store {
     /// Inserts or replaces a row; a new key goes to the end, an existing one keeps its
     /// place (Python dict assignment).
     fn put(&mut self, key: String, row: Value) {
+        let row = Arc::new(row);
+        if self.disk.is_some() {
+            self.pending.push(Op::Put(key.clone(), Arc::clone(&row)));
+        }
+        self.put_arc(key, row);
+    }
+
+    fn put_arc(&mut self, key: String, row: Arc<Value>) {
         if let Some(slot) = self.by_key.get(&key).and_then(|&i| self.slots.get_mut(i)) {
-            *slot = Some((key, Arc::new(row)));
+            *slot = Some((key, row));
             return;
         }
         self.by_key.insert(key.clone(), self.slots.len());
-        self.slots.push(Some((key, Arc::new(row))));
+        self.slots.push(Some((key, row)));
     }
 
     fn remove(&mut self, key: &str) {
+        if self.disk.is_some() {
+            self.pending.push(Op::Remove(key.to_owned()));
+        }
         if let Some(slot) = self.by_key.remove(key).and_then(|i| self.slots.get_mut(i)) {
             *slot = None;
         }
         if self.slots.len() > 64 && self.by_key.len() < self.slots.len() / 2 {
-            self.compact();
+            self.drop_dead_slots();
         }
     }
 
-    fn compact(&mut self) {
+    fn drop_dead_slots(&mut self) {
         self.slots.retain(Option::is_some);
         self.by_key = self
             .slots
@@ -257,6 +401,21 @@ impl Store {
     /// field), `inc`, `add`, `add-distinct` and `remove` change the stored document in
     /// place.
     fn atomic(&mut self, key: &str, update: &Map<String, Value>) -> Result<(), UpdateError> {
+        let result = self.atomic_in_place(key, update);
+        if self.disk.is_some()
+            && let Some(row) = self.by_key.get(key).and_then(|&i| self.slots.get(i))
+            && let Some((_, row)) = row
+        {
+            self.pending.push(Op::Put(key.to_owned(), Arc::clone(row)));
+        }
+        result
+    }
+
+    fn atomic_in_place(
+        &mut self,
+        key: &str,
+        update: &Map<String, Value>,
+    ) -> Result<(), UpdateError> {
         let uk = self.schema.unique_key.as_str();
         let Some((_, current)) = self
             .by_key
@@ -298,32 +457,130 @@ impl Store {
         Ok(())
     }
 
-    /// Writes `<data dir>/docs.jsonl` (to `docs.tmp`, then renamed); a store without a
-    /// data directory does nothing.
+    /// Makes the changes since the last call durable: appends them to the log as one
+    /// line and syncs it, so a request that returns has survived a kill. Compacts when
+    /// the log has outgrown its threshold. A store without a data directory does nothing.
     ///
     /// # Errors
-    /// Fails if the directory or file cannot be written.
-    pub fn save(&self) -> Result<(), Error> {
-        let Some(path) = &self.path else {
+    /// Fails if the log cannot be written; the log is then cut back to its last good
+    /// line.
+    pub fn persist(&mut self) -> Result<(), Error> {
+        let Some(disk) = &mut self.disk else {
             return Ok(());
         };
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
+        if self.pending.is_empty() {
+            return Ok(());
         }
-        let tmp = path.with_extension("tmp");
-        {
-            let mut out = BufWriter::new(File::create(&tmp)?);
-            for (_, row) in self.slots.iter().flatten() {
-                serde_json::to_writer(&mut out, &**row)?;
-                out.write_all(b"\n")?;
+        let mut line = Vec::new();
+        line.extend_from_slice(b"{\"ops\":[");
+        for (i, op) in self.pending.iter().enumerate() {
+            if i > 0 {
+                line.push(b',');
             }
-            out.into_inner()
-                .map_err(|e| Error::Io(e.into_error()))?
-                .sync_all()?;
+            let (tag, key, row) = match op {
+                Op::Put(key, row) => ("p", key, Some(&**row)),
+                Op::Remove(key) => ("d", key, None),
+            };
+            line.extend_from_slice(format!("[\"{tag}\",").as_bytes());
+            serde_json::to_writer(&mut line, key)?;
+            if let Some(row) = row {
+                line.push(b',');
+                serde_json::to_writer(&mut line, row)?;
+            }
+            line.push(b']');
         }
-        std::fs::rename(&tmp, path)?;
+        line.extend_from_slice(b"]}\n");
+        let mut file = if let Some(f) = disk.wal.take() {
+            f
+        } else {
+            std::fs::create_dir_all(&disk.dir)?;
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(disk.wal_path())?
+        };
+        let written = file.write_all(&line).and_then(|()| file.sync_all());
+        if let Err(e) = written {
+            let _ = file.set_len(disk.wal_len);
+            disk.wal = Some(file);
+            return Err(e.into());
+        }
+        if disk.wal_len == 0 {
+            sync_dir(&disk.dir);
+        }
+        disk.wal_len += line.len() as u64;
+        disk.wal = Some(file);
+        self.pending.clear();
+        if disk.wal_len > disk.compaction_threshold()
+            && let Err(e) = self.compact()
+        {
+            eprintln!("warning: could not compact the store: {e}");
+        }
         Ok(())
     }
+
+    /// Writes a new snapshot of every row (to `docs.tmp`, then renamed over
+    /// `docs.jsonl`) and starts the log again. A store without a data directory does
+    /// nothing.
+    ///
+    /// # Errors
+    /// Fails if the directory, a file or a rename fails; the old files are then intact.
+    pub fn compact(&mut self) -> Result<(), Error> {
+        let Some(disk) = &mut self.disk else {
+            return Ok(());
+        };
+        std::fs::create_dir_all(&disk.dir)?;
+        let path = disk.snapshot_path();
+        let tmp = path.with_extension("tmp");
+        let mut out = BufWriter::new(File::create(&tmp)?);
+        let mut written = 0u64;
+        let mut row_bytes = Vec::new();
+        for (_, row) in self.slots.iter().flatten() {
+            row_bytes.clear();
+            serde_json::to_writer(&mut row_bytes, &**row)?;
+            row_bytes.push(b'\n');
+            out.write_all(&row_bytes)?;
+            written += row_bytes.len() as u64;
+        }
+        out.into_inner()
+            .map_err(|e| Error::Io(e.into_error()))?
+            .sync_all()?;
+        std::fs::rename(&tmp, &path)?;
+        sync_dir(&disk.dir);
+        disk.snapshot_len = written;
+        // A crash before the log is emptied leaves records the snapshot already holds.
+        let wal = disk.wal.take();
+        let file = match wal {
+            Some(f) => f,
+            None => OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(disk.wal_path())?,
+        };
+        file.set_len(0)?;
+        file.sync_all()?;
+        disk.wal = Some(file);
+        disk.wal_len = 0;
+        Ok(())
+    }
+}
+
+/// The operations of one log record `{"ops": [["p", key, row], ["d", key], ...]}`.
+fn parse_ops(record: &Value) -> Option<Vec<Op>> {
+    record
+        .get("ops")?
+        .as_array()?
+        .iter()
+        .map(|op| {
+            let op = op.as_array()?;
+            let key = op.get(1)?.as_str()?.to_owned();
+            match op.first()?.as_str()? {
+                "p" => Some(Op::Put(key, Arc::new(op.get(2)?.clone()))),
+                "d" => Some(Op::Remove(key)),
+                _ => None,
+            }
+        })
+        .collect()
 }
 
 fn apply_op(
@@ -601,21 +858,179 @@ mod tests {
         assert!(s.get("/k/195").is_some());
     }
 
-    #[test]
-    fn save_and_open_round_trip() {
-        let dir = std::env::temp_dir().join(format!("minisolr-store-{}", std::process::id()));
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("minisolr-store-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    /// Adds, re-adds, updates atomically and deletes, persisting after each request.
+    fn churn(s: &mut Store) {
+        for (i, doc) in [
+            json!({"key": "/authors/OL1A", "name": "Zo\u{eb}", "rank": 1.5}),
+            work(),
+            json!({"key": "/works/OL2W", "title": "second", "_childDocuments_": [{"key": "/books/OL9M"}]}),
+            json!({"key": "/works/OL1W", "title": {"set": "Alice II"}, "edition_count": {"inc": 5}}),
+            json!({"key": "/authors/OL1A", "name": "Zo\u{eb} again"}),
+        ]
+        .iter()
+        .enumerate()
+        {
+            s.add(doc).expect("add");
+            s.persist().expect("persist");
+            if i == 3 {
+                s.delete_id("/works/OL2W");
+                s.persist().expect("persist");
+            }
+        }
+    }
+
+    #[test]
+    fn persist_and_open_round_trip() {
+        let dir = temp_dir("round");
         let mut s = Store::open(schema(), &dir).expect("open empty");
         assert!(s.is_empty() && s.persistent());
-        s.add(&work()).expect("add");
-        s.add(&json!({"key": "/authors/OL1A", "name": "Zoë", "rank": 1.5}))
-            .expect("add");
-        s.save().expect("save");
+        churn(&mut s);
         assert!(!dir.join("docs.tmp").exists());
+        assert!(dir.join("docs.wal").exists() && !dir.join("docs.jsonl").exists());
         let back = Store::open(schema(), &dir).expect("reopen");
         assert_eq!(keys(&back), keys(&s));
+        assert_eq!(
+            keys(&back),
+            ["/works/OL1W", "/books/OL1M", "/books/OL2M", "/authors/OL1A"]
+        );
         assert_eq!(back.rows(), s.rows());
+        assert_eq!(back.get("/works/OL1W").expect("row")["edition_count"], 7);
         assert!(back.version > 0);
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn a_plain_snapshot_directory_loads_and_then_grows_a_log() {
+        let dir = temp_dir("old");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        std::fs::write(
+            dir.join("docs.jsonl"),
+            "{\"key\": \"/a\", \"_root_\": \"/a\"}\n\n{\"key\": \"/b\", \"_root_\": \"/b\"}\n",
+        )
+        .expect("write");
+        let mut s = Store::open(schema(), &dir).expect("open");
+        assert_eq!(keys(&s), ["/a", "/b"]);
+        assert!(!dir.join("docs.wal").exists(), "reading changes nothing");
+        s.add(&json!({"key": "/c"})).expect("add");
+        s.persist().expect("persist");
+        let back = Store::open(schema(), &dir).expect("reopen");
+        assert_eq!(keys(&back), ["/a", "/b", "/c"]);
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn a_torn_last_line_is_dropped_and_the_log_stays_appendable() {
+        for torn in [
+            &b"{\"ops\":[[\"p\",\"/zzz\",{\"key\":\"/z"[..],
+            b"{\"ops\":[[\"d\",\"/authors/OL1A\"]]}",
+            b"\0\0\0\0",
+            b"not json\n",
+        ] {
+            let dir = temp_dir("torn");
+            let mut s = Store::open(schema(), &dir).expect("open");
+            churn(&mut s);
+            let wal = dir.join("docs.wal");
+            let good = std::fs::metadata(&wal).expect("wal").len();
+            let mut f = OpenOptions::new()
+                .append(true)
+                .open(&wal)
+                .expect("open wal");
+            f.write_all(torn).expect("tear");
+            drop(f);
+            let mut back = Store::open(schema(), &dir).expect("reopen despite the torn tail");
+            assert_eq!(back.rows(), s.rows());
+            assert_eq!(
+                std::fs::metadata(&wal).expect("wal").len(),
+                good,
+                "cut back"
+            );
+            back.add(&json!({"key": "/after"})).expect("add");
+            back.persist().expect("persist");
+            let again = Store::open(schema(), &dir).expect("reopen again");
+            assert_eq!(again.rows(), back.rows());
+            assert!(again.get("/after").is_some());
+            std::fs::remove_dir_all(&dir).expect("cleanup");
+        }
+    }
+
+    #[test]
+    fn corruption_before_the_last_line_is_an_error() {
+        let dir = temp_dir("corrupt");
+        let mut s = Store::open(schema(), &dir).expect("open");
+        churn(&mut s);
+        let wal = dir.join("docs.wal");
+        let mut text = std::fs::read_to_string(&wal).expect("read");
+        let at = text.find('\n').expect("header") + 1;
+        text.insert_str(at, "garbage\n");
+        std::fs::write(&wal, text).expect("write");
+        assert!(Store::open(schema(), &dir).is_err());
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn a_large_log_is_compacted_into_the_snapshot() {
+        let dir = temp_dir("compact");
+        let mut s = Store::open(schema(), &dir).expect("open");
+        let big = "x".repeat(20_000);
+        for i in 0..120 {
+            s.add(&json!({"key": format!("/k/{}", i % 50), "title": big, "n": i}))
+                .expect("add");
+            s.persist().expect("persist");
+        }
+        let snapshot = std::fs::metadata(dir.join("docs.jsonl"))
+            .expect("compacted")
+            .len();
+        assert!(snapshot > 0);
+        assert!(std::fs::metadata(dir.join("docs.wal")).expect("wal").len() < MIN_WAL);
+        let back = Store::open(schema(), &dir).expect("reopen");
+        assert_eq!(back.rows(), s.rows());
+        assert_eq!(keys(&back).len(), 50);
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn a_log_left_over_from_an_interrupted_compaction_changes_nothing() {
+        let dir = temp_dir("stale");
+        let mut s = Store::open(schema(), &dir).expect("open");
+        churn(&mut s);
+        let old_wal = std::fs::read(dir.join("docs.wal")).expect("wal");
+        s.compact().expect("compact");
+        let want = s.rows();
+        // The crash came after the snapshot was renamed, before the log was emptied.
+        std::fs::write(dir.join("docs.wal"), old_wal).expect("restore");
+        let back = Store::open(schema(), &dir).expect("reopen");
+        assert_eq!(back.rows(), want, "same rows in the same order");
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn open_compacts_a_log_past_its_threshold() {
+        let dir = temp_dir("open-compact");
+        let mut s = Store::open(schema(), &dir).expect("open");
+        s.add(&json!({"key": "/seed"})).expect("add");
+        s.persist().expect("persist");
+        let wal = dir.join("docs.wal");
+        let mut f = OpenOptions::new()
+            .append(true)
+            .open(&wal)
+            .expect("open wal");
+        let pad = format!(
+            "{{\"ops\":[[\"p\",\"/pad\",{{\"key\":\"/pad\",\"t\":\"{}\"}}]]}}\n",
+            "y".repeat(usize::try_from(MIN_WAL).expect("small") + 10)
+        );
+        f.write_all(pad.as_bytes()).expect("pad");
+        drop(f);
+        let back = Store::open(schema(), &dir).expect("reopen");
+        assert_eq!(keys(&back), ["/seed", "/pad"]);
+        assert!(dir.join("docs.jsonl").exists());
+        assert_eq!(std::fs::metadata(&wal).expect("wal").len(), 0);
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 }

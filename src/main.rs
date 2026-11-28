@@ -11,7 +11,7 @@ use minisolr::server::{Core, serve};
 use minisolr::store::Store;
 use serde_json::Value;
 
-const USAGE: &str = "usage:\n  minisolr serve [--strict] <conf-dir> <data-dir | docs.jsonl> [addr=127.0.0.1:8983]\n  minisolr parity <conf-dir> <tokens.jsonl>\n  minisolr ping [addr=127.0.0.1:8983]\n\n<conf-dir> holds managed-schema.xml and enumsConfig.xml. A data directory (created if\nmissing) persists updates in <data-dir>/docs.jsonl; a .jsonl file is loaded and updates\nstay in memory. --strict (or MINISOLR_STRICT=1) answers HTTP 400 for\nrequests that use unsupported features instead of an empty or partial result. `ping` exits 0 if the server at addr answers its ping (a healthcheck).";
+const USAGE: &str = "usage:\n  minisolr serve [--strict] <conf-dir> <data-dir | docs.jsonl> [addr=127.0.0.1:8983]\n  minisolr parity <conf-dir> <tokens.jsonl>\n  minisolr ping [addr=127.0.0.1:8983]\n\n<conf-dir> holds managed-schema.xml and enumsConfig.xml. A data directory (created if\nmissing) persists updates in <data-dir> (docs.jsonl snapshot plus docs.wal log); a .jsonl file is loaded and updates\nstay in memory. --strict (or MINISOLR_STRICT=1) answers HTTP 400 for\nrequests that use unsupported features instead of an empty or partial result. `ping` exits 0 if the server at addr answers its ping (a healthcheck).";
 
 fn main() -> ExitCode {
     let mut args: Vec<String> = std::env::args().skip(1).collect();

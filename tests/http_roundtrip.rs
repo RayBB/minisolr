@@ -862,3 +862,136 @@ fn strict_mode_rejects_unsupported_features() -> TestResult {
     assert!(doc["unsupported"].as_array().is_some_and(|a| a.len() >= 5));
     Ok(())
 }
+
+/// The same updates against an in-memory server, a data directory and that directory
+/// after a restart give the same search results.
+#[test]
+fn updates_atomics_deletes_and_restart_agree_with_an_in_memory_store() -> TestResult {
+    let tmp = std::env::temp_dir().join(format!("minisolr-equiv-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp)?;
+    let empty = tmp.join("empty.jsonl");
+    std::fs::write(&empty, "")?;
+    let dir = tmp.join("data");
+    std::fs::create_dir_all(&dir)?;
+    let memory = start(&empty)?;
+    let disk = start(&dir)?;
+    let bodies = [
+        r#"{"add": {"doc": {"key": "/works/OL1W", "type": "work", "title": "Alice in Wonderland", "edition_count": 2, "subject": ["a"],
+            "editions": [{"key": "/books/OL1M", "type": "edition", "language": ["eng"]}, {"key": "/books/OL2M", "type": "edition", "language": ["fre"]}]}},
+           "add": {"doc": {"key": "/works/OL2W", "type": "work", "title": "Tom Sawyer", "edition_count": 1}}, "commit": {}}"#,
+        r#"[{"key": "/works/OL1W", "edition_count": {"inc": 4}, "title": {"set": "Alice II"}, "subject": {"add": ["b", "c"]}},
+            {"key": "/books/OL1M", "language": {"set": ["ger"]}}]"#,
+        r#"{"add": {"doc": {"key": "/works/OL3W", "type": "work", "title": "Moby Dick", "editions": [{"key": "/books/OL3M", "type": "edition"}]}}}"#,
+        r#"{"add": {"doc": {"key": "/works/OL2W", "type": "work", "title": "Tom Sawyer abroad", "edition_count": 3}}}"#,
+        r#"{"delete": {"id": "/works/OL1W"}, "commit": {}}"#,
+        r#"{"delete": {"query": "title:moby"}}"#,
+        r#"{"add": {"doc": {"key": "/works/OL4W", "type": "work", "title": "Alice returns"}}, "commit": {}}"#,
+    ];
+    let search = |addr: &str| -> TestResult<Vec<Value>> {
+        let get = |q: &str| {
+            request(
+                addr,
+                &format!("GET /solr/openlibrary/select?{q} HTTP/1.1"),
+                "",
+            )
+        };
+        Ok(vec![
+            get("q=*:*&rows=100&fl=key,title,edition_count,subject,language,_root_&sort=key+asc")?
+                ["response"]
+                .clone(),
+            get("q=title:alice&fl=key")?["response"].clone(),
+            get("q=*:*&rows=0&facet=true&facet.field=type&facet.field=language")?["facet_counts"]
+                .clone(),
+            get("q=*:*&rows=100&fl=key")?["response"].clone(),
+        ])
+    };
+    let mut last = Vec::new();
+    for (i, body) in bodies.iter().enumerate() {
+        for addr in [&memory, &disk] {
+            let r = request(
+                addr,
+                "POST /solr/openlibrary/update HTTP/1.1\r\nContent-Type: application/json",
+                body,
+            )?;
+            assert_eq!(r["responseHeader"]["status"], 0, "step {i}: {r}");
+        }
+        last = search(&memory)?;
+        assert_eq!(last, search(&disk)?, "step {i}");
+    }
+    assert_eq!(
+        last[3]["docs"],
+        serde_json::json!([{"key": "/works/OL2W"}, {"key": "/works/OL4W"}]),
+        "deleted roots took their children along"
+    );
+    let restarted = start(&dir)?;
+    assert_eq!(search(&restarted)?, last, "restart after updates");
+    std::fs::remove_dir_all(&tmp)?;
+    Ok(())
+}
+
+/// A server process killed with SIGKILL right after answering an update still has it,
+/// even when the kill left half a log line behind.
+#[test]
+fn committed_updates_survive_kill_9_and_a_torn_log_tail() -> TestResult {
+    let dir = std::env::temp_dir().join(format!("minisolr-kill-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let spawn = |addr: &str| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_minisolr"))
+            .args(["serve", "tests/data/conf", &dir.to_string_lossy(), addr])
+            .stderr(std::process::Stdio::null())
+            .spawn()
+    };
+    let wait_up = |addr: &str| -> TestResult {
+        for _ in 0..200 {
+            if TcpStream::connect(addr).is_ok() {
+                return Ok(());
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        Err("server did not start".into())
+    };
+    let addr = free_addr()?;
+    let mut child = spawn(&addr)?;
+    wait_up(&addr)?;
+    for i in 0..5 {
+        let body = format!(
+            r#"{{"add": {{"doc": {{"key": "/works/K{i}W", "type": "work", "title": "durable {i}"}}}}}}"#
+        );
+        let r = request(
+            &addr,
+            "POST /solr/openlibrary/update HTTP/1.1\r\nContent-Type: application/json",
+            &body,
+        )?;
+        assert_eq!(r["responseHeader"]["status"], 0);
+    }
+    child.kill()?;
+    child.wait()?;
+    let mut wal = std::fs::OpenOptions::new()
+        .append(true)
+        .open(dir.join("docs.wal"))?;
+    wal.write_all(br#"{"ops":[["p","/works/TORN","#)?;
+    drop(wal);
+    let addr = free_addr()?;
+    let mut child = spawn(&addr)?;
+    wait_up(&addr)?;
+    let found = request(
+        &addr,
+        "GET /solr/openlibrary/select?q=title:durable&fl=key&sort=key+asc HTTP/1.1",
+        "",
+    )?;
+    assert_eq!(
+        keys(&found),
+        [
+            "/works/K0W",
+            "/works/K1W",
+            "/works/K2W",
+            "/works/K3W",
+            "/works/K4W"
+        ]
+    );
+    child.kill()?;
+    child.wait()?;
+    std::fs::remove_dir_all(&dir)?;
+    Ok(())
+}
