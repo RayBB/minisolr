@@ -1,4 +1,4 @@
-//! Command line entry point: `serve` the index over HTTP or check analyzer `parity`.
+//! Command line entry point: `serve` the index over HTTP, `compact` a data directory or check analyzer `parity`.
 
 use std::io::{BufRead, BufReader};
 use std::path::Path;
@@ -11,7 +11,7 @@ use minisolr::server::{Core, serve};
 use minisolr::store::Store;
 use serde_json::Value;
 
-const USAGE: &str = "usage:\n  minisolr serve [--strict] <conf-dir> <data-dir | docs.jsonl> [addr=127.0.0.1:8983]\n  minisolr parity <conf-dir> <tokens.jsonl>\n  minisolr ping [addr=127.0.0.1:8983]\n\n<conf-dir> holds managed-schema.xml and enumsConfig.xml. A data directory (created if\nmissing) persists updates in <data-dir> (docs.jsonl snapshot plus docs.wal log); a .jsonl file is loaded and updates\nstay in memory. --strict (or MINISOLR_STRICT=1) answers HTTP 400 for\nrequests that use unsupported features instead of an empty or partial result. `ping` exits 0 if the server at addr answers its ping (a healthcheck).";
+const USAGE: &str = "usage:\n  minisolr serve [--strict] <conf-dir> <data-dir | docs.jsonl> [addr=127.0.0.1:8983]\n  minisolr compact <conf-dir> <data-dir>\n  minisolr parity <conf-dir> <tokens.jsonl>\n  minisolr ping [addr=127.0.0.1:8983]\n\n<conf-dir> holds managed-schema.xml and enumsConfig.xml. A data directory (created if\nmissing) persists updates in <data-dir> (docs.jsonl snapshot plus docs.wal log); a .jsonl file is loaded and updates\nstay in memory. `compact` folds the log into docs.jsonl and exits (stop the server first). --strict (or MINISOLR_STRICT=1) answers HTTP 400 for\nrequests that use unsupported features instead of an empty or partial result. `ping` exits 0 if the server at addr answers its ping (a healthcheck).";
 
 fn main() -> ExitCode {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
@@ -29,6 +29,7 @@ fn main() -> ExitCode {
     {
         ["serve", conf, docs] => run_serve(conf, docs, "127.0.0.1:8983", strict),
         ["serve", conf, docs, addr] => run_serve(conf, docs, addr, strict),
+        ["compact", conf, data] => compact(conf, Path::new(data)),
         ["parity", conf, tokens] => parity(conf, Path::new(tokens)),
         ["ping"] => minisolr::ping::ping("127.0.0.1:8983"),
         ["ping", addr] => minisolr::ping::ping(addr),
@@ -66,6 +67,13 @@ fn run_serve(conf: &str, data: &str, addr: &str, strict: bool) -> Result<(), Err
         &Arc::new(Core::new(store, schema).with_strict(strict)),
         addr,
     )
+}
+
+/// Folds `<data>/docs.wal` into `<data>/docs.jsonl`, so the snapshot alone holds every document.
+fn compact(conf: &str, data: &Path) -> Result<(), Error> {
+    let schema = Arc::new(Schema::load(Path::new(conf))?);
+    let mut store = Store::open(schema, data)?;
+    store.compact()
 }
 
 /// Compares Rust tokens with Python's, dumped as JSON lines of `{"field" or "type",

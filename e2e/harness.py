@@ -622,7 +622,11 @@ def cmd_measure(args: argparse.Namespace) -> None:
 
 def cmd_export_docs(_args: argparse.Namespace) -> None:
     """Copy the shim's document store out of the container into fixtures/docs.jsonl (the no-Docker tests load it)."""
+    # The store keeps recent updates in docs.wal; fold them into docs.jsonl (server stopped) before copying it out.
+    dc("stop", "solr", timeout=120)
+    dc("run", "--rm", "--no-deps", "--entrypoint", "/minisolr", "solr", "compact", "/conf", "/data", timeout=300)
     dc("cp", "solr:/data/docs.jsonl", str(DOCS))
+    dc("start", "solr", timeout=120)
     say(f"wrote {DOCS} ({sum(1 for _ in DOCS.open())} docs)")
 
 

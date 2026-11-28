@@ -995,3 +995,32 @@ fn committed_updates_survive_kill_9_and_a_torn_log_tail() -> TestResult {
     std::fs::remove_dir_all(&dir)?;
     Ok(())
 }
+
+/// `minisolr compact` leaves every document in the snapshot and the log empty, as the e2e
+/// harness's `export-docs` needs.
+#[test]
+fn compact_command_folds_the_log_into_the_snapshot() -> TestResult {
+    let dir = std::env::temp_dir().join(format!("minisolr-compact-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let addr = start(&dir)?;
+    let body = r#"{"add": {"doc": {"key": "/works/C1W", "type": "work", "title": "folded"}}}"#;
+    let r = request(
+        &addr,
+        "POST /solr/openlibrary/update HTTP/1.1\r\nContent-Type: application/json",
+        body,
+    )?;
+    assert_eq!(r["responseHeader"]["status"], 0);
+    let wal = dir.join("docs.wal");
+    assert!(
+        std::fs::metadata(&wal)?.len() > 0,
+        "the update is in the log"
+    );
+    let status = std::process::Command::new(env!("CARGO_BIN_EXE_minisolr"))
+        .args(["compact", "tests/data/conf", &dir.to_string_lossy()])
+        .status()?;
+    assert!(status.success());
+    assert_eq!(std::fs::metadata(&wal)?.len(), 0);
+    assert!(std::fs::read_to_string(dir.join("docs.jsonl"))?.contains("/works/C1W"));
+    std::fs::remove_dir_all(&dir)?;
+    Ok(())
+}
