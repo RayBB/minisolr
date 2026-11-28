@@ -233,6 +233,18 @@ impl Index {
         }))
     }
 
+    /// Fails like Solr's `undefined field: "name"` (HTTP 400) when the schema has no such field.
+    ///
+    /// # Errors
+    /// [`Error::BadRequest`] for a name the schema does not define.
+    pub fn require_defined(&self, name: &str) -> Result<(), Error> {
+        if self.schema.get(name).is_some() {
+            Ok(())
+        } else {
+            Err(Error::BadRequest(format!("undefined field: \"{name}\"")))
+        }
+    }
+
     /// The indexed field for a query on `name`.
     ///
     /// `Ok(None)` means the schema knows the field but no document has it, so nothing

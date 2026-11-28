@@ -90,6 +90,7 @@ pub(crate) fn facet_counts(store: &Index, hits: &[usize], params: &Params) -> Re
     let mut fields = Map::new();
     for raw in params.all("facet.field") {
         let field = strip_local_params(raw);
+        store.require_defined(field)?;
         let opt = |name: &str| {
             params
                 .get(&format!("f.{field}.facet.{name}"))
@@ -188,6 +189,7 @@ pub(crate) fn json_facets(store: &Index, hits: &[usize], spec: &Value) -> Result
         match agg {
             Value::String(text) => match aggregation(text) {
                 Some(("sum", Some(field))) => {
+                    store.require_defined(field)?;
                     out.insert(name.clone(), sum(store, hits, field));
                 }
                 _ => eprintln!("warning: UNSUPPORTED (ignored): json.facet aggregation {text:?}"),
@@ -244,6 +246,7 @@ fn terms(store: &Index, hits: &[usize], spec: &Map<String, Value>) -> Result<Val
         .get("field")
         .and_then(Value::as_str)
         .ok_or_else(|| Error::Other("json.facet terms without a field".into()))?;
+    store.require_defined(field)?;
     let mincount = int_value(spec.get("mincount"), 1, "mincount")?;
     let limit = int_value(spec.get("limit"), 10, "limit")?;
     let offset = int_value(spec.get("offset"), 0, "offset")?;

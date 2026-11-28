@@ -167,6 +167,14 @@ impl Compiler<'_> {
         if qf.is_empty() {
             qf.push(("title", 1.0));
         }
+        if let Some((name, _)) = qf
+            .iter()
+            .find(|(n, _)| !n.contains('*') && self.store.schema.get(n).is_none())
+        {
+            return Err(Error::BadRequest(format!(
+                "org.apache.solr.search.SyntaxError: Query Field '{name}' is not a valid field name"
+            )));
+        }
         let and_op = inherited(local, params, "q.op") == Some("AND");
         let sub = Ctx {
             default_fields: Some(&qf),
@@ -202,6 +210,9 @@ impl Compiler<'_> {
                 continue;
             };
             for (name, boost) in parse_boosts(deref(params, spec))? {
+                if self.store.schema.get(name).is_none() {
+                    continue;
+                }
                 let shingles: Vec<String> = if size == 0 {
                     vec![words.join(" ")]
                 } else {

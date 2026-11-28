@@ -366,7 +366,8 @@ fn search(
         .get("sort")
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .map(|spec| sort::parse_sort(store, spec, params));
+        .map(|spec| sort::parse_sort(store, spec, params))
+        .transpose()?;
     let searcher = store.reader.searcher();
     let (num_found, page, all) = if sort_keys.is_none() && rescore.is_empty() && !want_all {
         let (count, top) = if rows == 0 {
@@ -942,11 +943,64 @@ mod tests {
     }
 
     #[test]
+    fn undefined_fields_are_bad_requests_with_solrs_messages() {
+        let s = store();
+        let bad = |extra: &[(&str, &str)], msg: &str| {
+            let mut pairs = vec![("q", "*:*")];
+            pairs.extend_from_slice(extra);
+            match select(&s, &params(&pairs)) {
+                Err(Error::BadRequest(m)) => assert_eq!(m, msg, "{pairs:?}"),
+                other => panic!("{pairs:?}: {:?}", other.map(|r| r.num_found)),
+            }
+        };
+        let plain = "undefined field nope";
+        let quoted = "undefined field: \"nope\"";
+        for q in [
+            "nope:x",
+            "title:tom OR nope:x",
+            "title:tom -nope:x",
+            "nope:x*",
+            "nope:\"a b\"",
+            "nope:(a b)",
+            "{!lucene}nope:x",
+            "{!terms f=nope}a,b",
+        ] {
+            bad(&[("q", q)], plain);
+        }
+        for q in ["nope:[1 TO 2]", "{!field f=nope}a", "{!prefix f=nope}a"] {
+            bad(&[("q", q)], quoted);
+        }
+        bad(&[("fq", "nope:x")], plain);
+        bad(&[("q", "x"), ("df", "nope")], plain);
+        bad(&[("facet.field", "nope")], quoted);
+        bad(&[("facet", "true"), ("facet.query", "nope:x")], plain);
+        bad(
+            &[("sort", "nope desc")],
+            "sort param field can't be found: nope",
+        );
+        bad(
+            &[("defType", "edismax"), ("qf", "title nope")],
+            "org.apache.solr.search.SyntaxError: Query Field 'nope' is not a valid field name",
+        );
+        for ok in [
+            &[("defType", "edismax"), ("qf", "title"), ("q", "nope:x")][..],
+            &[
+                ("defType", "edismax"),
+                ("qf", "title"),
+                ("q", "tom"),
+                ("pf", "nope"),
+            ],
+            &[("fl", "nope")],
+        ] {
+            assert!(select(&s, &params(ok)).is_ok(), "{ok:?}");
+        }
+    }
+
+    #[test]
     fn unsupported_syntax_is_rejected() {
         let s = store();
         for q in [
             "title:[a TO b]",
-            "nope:x",
             "alice",
             "{!xyz v=1}",
             "{!terms f=x",

@@ -16,6 +16,7 @@ use serde_json::{Map, Value, json};
 use tiny_http::{Header, Method, Request, Response, Server};
 
 use crate::Error;
+use crate::error::bad_request_body;
 use crate::index::Index;
 use crate::query::{self, Params, Selection};
 use crate::schema::Schema;
@@ -345,8 +346,9 @@ fn with_index(core: &Core, f: impl FnOnce(&Index) -> (u16, Value)) -> (u16, Valu
     }
 }
 
-/// A Solr-shaped `/select` (or `/export`) response from `run`; an unsupported request
-/// becomes an empty result with a `warning` in the header. `nextCursorMark`,
+/// A Solr-shaped `/select` (or `/export`) response from `run`; a request real Solr
+/// rejects ([`Error::BadRequest`]) becomes its HTTP 400 error, an unsupported one an
+/// empty result with a `warning` in the header. `nextCursorMark`,
 /// `facet_counts` and `facets` are added when the selection has them.
 pub fn select_response(
     params: &Params,
@@ -354,7 +356,15 @@ pub fn select_response(
 ) -> (u16, Value) {
     let started = Instant::now();
     let mut warning = None;
-    let selection = run(params).unwrap_or_else(|e| {
+    let result = run(params);
+    if let Err(Error::BadRequest(msg)) = &result {
+        eprintln!(
+            "error: 400 {msg}; q={:?}",
+            params.get("q").unwrap_or_default()
+        );
+        return (400, bad_request_body(msg, started.elapsed().as_millis()));
+    }
+    let selection = result.unwrap_or_else(|e| {
         eprintln!(
             "warning: UNSUPPORTED (ignored): {e}; q={:?}",
             params.get("q").unwrap_or_default()

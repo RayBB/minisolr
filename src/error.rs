@@ -17,6 +17,8 @@ pub enum Error {
     Schema(String),
     /// The request uses a Solr feature the prototype does not implement.
     Unsupported(String),
+    /// A request real Solr rejects with HTTP 400 and this `error.msg`.
+    BadRequest(String),
     /// Anything else, with a message.
     Other(String),
 }
@@ -30,7 +32,7 @@ impl fmt::Display for Error {
             Self::Xml(e) => write!(f, "xml error: {e}"),
             Self::Schema(msg) => write!(f, "schema error: {msg}"),
             Self::Unsupported(what) => write!(f, "unsupported: {what}"),
-            Self::Other(msg) => f.write_str(msg),
+            Self::BadRequest(msg) | Self::Other(msg) => f.write_str(msg),
         }
     }
 }
@@ -42,7 +44,7 @@ impl std::error::Error for Error {
             Self::Json(e) => Some(e),
             Self::Tantivy(e) => Some(e),
             Self::Xml(e) => Some(e),
-            Self::Schema(_) | Self::Unsupported(_) | Self::Other(_) => None,
+            Self::Schema(_) | Self::Unsupported(_) | Self::BadRequest(_) | Self::Other(_) => None,
         }
     }
 }
@@ -69,4 +71,21 @@ impl From<roxmltree::Error> for Error {
     fn from(e: roxmltree::Error) -> Self {
         Self::Xml(e)
     }
+}
+
+/// The JSON body of a Solr `SolrException` answered with HTTP 400.
+#[must_use]
+pub fn bad_request_body(msg: &str, qtime_ms: u128) -> serde_json::Value {
+    serde_json::json!({
+        "responseHeader": {"status": 400, "QTime": qtime_ms},
+        "error": {
+            "metadata": {
+                "error-class": "org.apache.solr.common.SolrException",
+                "root-error-class": "org.apache.solr.common.SolrException"
+            },
+            "errorClass": "org.apache.solr.common.SolrException",
+            "msg": msg,
+            "code": 400
+        }
+    })
 }

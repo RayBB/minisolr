@@ -12,6 +12,7 @@ use std::time::Instant;
 use serde_json::{Value, json};
 
 use crate::Error;
+use crate::error::bad_request_body;
 use crate::query::Params;
 use crate::store::{Store, UpdateError};
 
@@ -249,7 +250,7 @@ pub fn apply(
 fn fatal(msg: &str) -> Outcome {
     Outcome {
         status: 400,
-        body: json!({"responseHeader": {"status": 400}, "error": {"msg": msg, "code": 400}}),
+        body: bad_request_body(msg, 0),
         save: false,
     }
 }
@@ -281,8 +282,10 @@ fn delete(
             let q = q.as_str().ok_or_else(|| {
                 UpdateError::Fatal(format!("TypeError: delete query is not a string: {q}"))
             })?;
-            let keys = delete_query(store, q)
-                .map_err(|e| UpdateError::Fatal(format!("UnsupportedError: {e}")))?;
+            let keys = delete_query(store, q).map_err(|e| match e {
+                Error::BadRequest(msg) => UpdateError::Fatal(msg),
+                e => UpdateError::Fatal(format!("UnsupportedError: {e}")),
+            })?;
             for key in keys {
                 store.delete_id(&key);
             }
@@ -483,7 +486,7 @@ mod tests {
             out.status, 400,
             "a bad delete query is fatal even when tolerant"
         );
-        assert_eq!(out.body["responseHeader"], json!({"status": 400}));
+        assert_eq!(out.body["responseHeader"]["status"], 400);
         let out = apply(
             &mut s,
             r#"{"delete": {"nope": 1}}"#,

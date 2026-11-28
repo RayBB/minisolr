@@ -254,6 +254,23 @@ PROBES: list[dict[str, Any]] = [
     {"name": "lifecycle: delete by id", "kind": "update", "body": {"delete": ["/works/OL999999W"], "commit": {}}},
     {"name": "lifecycle: after delete", "params": {"q": "alternative_title:zebra", "fl": "key"}},
     {"name": "lifecycle: delete by query", "kind": "update", "body": {"delete": {"query": 'key:"/works/NOPE"'}, "commit": {}}},
+    # --- a field the schema does not define: real Solr answers HTTP 400 (error msg and code are compared) ---
+    {"name": "undefined field: q", "expect_error": True, "params": {"q": "nosuch:foo", "fl": "key"}},
+    {"name": "undefined field: OR clause", "expect_error": True, "params": {"q": "title:twain OR nosuch:foo", "fl": "key"}},
+    {"name": "undefined field: AND clause", "expect_error": True, "params": {"q": "title:twain AND nosuch:foo", "fl": "key"}},
+    {"name": "undefined field: fq", "expect_error": True, "params": {"q": "*:*", "fq": "nosuch:foo", "fl": "key"}},
+    {"name": "undefined field: wildcard", "expect_error": True, "params": {"q": "nosuch:fo*", "fl": "key"}},
+    {"name": "undefined field: range", "expect_error": True, "params": {"q": "nosuch:[1 TO 2]", "fl": "key"}},
+    {"name": "undefined field: df", "expect_error": True, "params": {"q": "foo", "df": "nosuch", "fl": "key"}},
+    {"name": "undefined field: {!terms}", "expect_error": True, "params": {"q": "{!terms f=nosuch}a,b", "fl": "key"}},
+    {"name": "undefined field: {!field}", "expect_error": True, "params": {"q": "{!field f=nosuch}a", "fl": "key"}},
+    {"name": "undefined field: {!prefix}", "expect_error": True, "params": {"q": "{!prefix f=nosuch}a", "fl": "key"}},
+    {"name": "undefined field: sort", "expect_error": True, "params": {"q": "*:*", "sort": "nosuch desc", "fl": "key"}},
+    {"name": "undefined field: facet.field", "expect_error": True, "params": {"q": "*:*", "facet": "true", "facet.field": "nosuch", "fl": "key"}},
+    {"name": "undefined field: hl.fl", "expect_error": True, "params": {"q": "title:twain", "hl": "true", "hl.fl": "nosuch", "fl": "key"}},
+    {"name": "undefined field: edismax qf", "expect_error": True, "params": {**ED, "qf": "title nosuch", "q": "twain", "fl": "key"}},
+    {"name": "undefined field: edismax prefix is text", "params": {**ED, "q": "nosuch:foo", "fl": "key"}},
+    {"name": "undefined field: delete by query", "kind": "update", "expect_error": True, "body": {"delete": {"query": "nosuch:foo"}, "commit": {}}},
 ]
 
 
@@ -335,7 +352,7 @@ def run_one(p: dict[str, Any]) -> SolrJson:
 def norm(p: dict[str, Any], j: SolrJson) -> dict[str, Any]:
     """The comparable essence of a response."""
     if "error" in j:
-        return {"error": str(j["error"].get("msg"))[:160]}
+        return {"error": str(j["error"].get("msg"))[:160], "code": j["error"].get("code")}
     kind = p.get("kind", "select")
     out: dict[str, Any] = {}
     if kind == "update":
@@ -406,7 +423,12 @@ def compare() -> bool:
         r = res.get(name, {"error": "missing"})
         p = probes[name]
         if "error" in g:
-            continue  # real Solr rejected it; nothing to match
+            if p.get("expect_error"):  # the rejection itself is what real Solr does
+                if (r.get("error"), r.get("code")) == (g["error"], g.get("code")):
+                    ok += 1
+                else:
+                    fails.append(f"{name}: expected HTTP {g.get('code')} {g['error']!r}, got {r}")
+            continue  # otherwise real Solr rejected it; nothing to match
         if "error" in r:
             fails.append(f"{name}: minisolr error: {r['error']}")
             continue
@@ -445,7 +467,7 @@ def compare() -> bool:
             fails.append(f"{name}: " + "; ".join(bad))
         else:
             ok += 1
-    total = len([1 for g in gold.values() if "error" not in g])
+    total = len([1 for n, g in gold.items() if "error" not in g or probes[n].get("expect_error")])
     print(f"probes: {ok}/{total} match real Solr (hard checks); {len(fails)} failing, {len(notes)} soft differences")
     for f in fails:
         print("  FAIL", f)

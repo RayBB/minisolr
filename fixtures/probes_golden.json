@@ -1004,5 +1004,69 @@
    "/works/OL53924W"
   ],
   "numFound": 2
+ },
+ "undefined field: AND clause": {
+  "code": 400,
+  "error": "undefined field nosuch"
+ },
+ "undefined field: OR clause": {
+  "code": 400,
+  "error": "undefined field nosuch"
+ },
+ "undefined field: delete by query": {
+  "code": 400,
+  "error": "undefined field nosuch"
+ },
+ "undefined field: df": {
+  "code": 400,
+  "error": "undefined field nosuch"
+ },
+ "undefined field: edismax prefix is text": {
+  "keys": [],
+  "numFound": 0
+ },
+ "undefined field: edismax qf": {
+  "code": 400,
+  "error": "org.apache.solr.search.SyntaxError: Query Field 'nosuch' is not a valid field name"
+ },
+ "undefined field: facet.field": {
+  "code": 400,
+  "error": "undefined field: \"nosuch\""
+ },
+ "undefined field: fq": {
+  "code": 400,
+  "error": "undefined field nosuch"
+ },
+ "undefined field: hl.fl": {
+  "code": 400,
+  "error": "undefined field nosuch"
+ },
+ "undefined field: q": {
+  "code": 400,
+  "error": "undefined field nosuch"
+ },
+ "undefined field: range": {
+  "code": 400,
+  "error": "undefined field: \"nosuch\""
+ },
+ "undefined field: sort": {
+  "code": 400,
+  "error": "sort param field can't be found: nosuch"
+ },
+ "undefined field: wildcard": {
+  "code": 400,
+  "error": "undefined field nosuch"
+ },
+ "undefined field: {!field}": {
+  "code": 400,
+  "error": "undefined field: \"nosuch\""
+ },
+ "undefined field: {!prefix}": {
+  "code": 400,
+  "error": "undefined field: \"nosuch\""
+ },
+ "undefined field: {!terms}": {
+  "code": 400,
+  "error": "undefined field nosuch"
  }
 }

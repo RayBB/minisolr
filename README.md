@@ -23,7 +23,7 @@ curl 'localhost:8983/solr/openlibrary/select?q=author_name:carroll&fq=type:work&
 curl -X POST 'localhost:8983/solr/openlibrary/update?commit=true' -H 'Content-Type: application/json' \
   -d '{"add": {"doc": {"key": "/works/OL1W", "type": "work", "title": "x"}}, "commit": {}}'
 cargo test --release
-python3 tools/check.py   # replay the captured Open Library requests and the 66 probes; the CI gate
+python3 tools/check.py   # replay the captured Open Library requests and the 82 probes; the CI gate
 ```
 
 The first argument is a Solr conf directory with `managed-schema.xml` (and optionally `enumsConfig.xml`). The second is the data directory (created if missing): the store is loaded from `<dir>/docs.jsonl` and saved there after every update request that changes something, in the same format as Python minisolr, so either server can open the other's directory. Given a `.jsonl` file instead, the server loads it and keeps updates in memory only. `minisolr-rs ping [addr]` exits 0 when the server at `addr` (default `127.0.0.1:8983`) answers `/solr/openlibrary/admin/ping`; the image uses it as its healthcheck.
@@ -134,7 +134,7 @@ Spellcheck (`spellcheck=true`), as Python's `spellcheck`: the words of `spellche
 
 `cursorMark`: as Python, `*` starts at 0, `o:<n>` at offset `n`, and `nextCursorMark` is `o:<start + returned>` (the cursor itself once a page is empty). No sort on the uniqueKey is required; ties break in index order, so pages are stable while the store does not change.
 
-An undefined field, a bare term with no default field, a range on a text field, an unknown `{!type}`, malformed local params, a `json.facet` URL parameter and grouping return an empty result with a `warning` in `responseHeader` and a line on stderr. A field the schema defines but no document has matches nothing.
+A bare term with no default field, a range on a text field, an unknown `{!type}`, malformed local params, a `json.facet` URL parameter and grouping return an empty result with a `warning` in `responseHeader` and a line on stderr. An undefined field answers HTTP 400 like real Solr (see Limits). A field the schema defines but no document has matches nothing.
 
 ## Analyzers
 
@@ -183,7 +183,7 @@ Correctness on the captured Open Library requests (`tools/replay.py`): all 267 a
 
 ## Limits
 
-As in Python: MoreLikeThis returns nothing (`/mlt` is empty, `mlt=true` is ignored), highlighting returns whole values rather than fragments, spellcheck has no collations, analyzer components Python lacks are skipped, and JSON facets stop at `sum` and `terms` (no nested facets, `avg`, `min`, `max`, `unique`); the whole store file is rewritten on every update request and the index is rebuilt in full after a change. Unlike Python, a query clause on an undefined field (or another feature Python only warns about inside a query) makes the whole request return an empty result with a `warning`, where Python logs the warning and treats just that clause as matching nothing (so `title:x OR nosuch:y` still returns the `title:x` hits).
+As in Python: MoreLikeThis returns nothing (`/mlt` is empty, `mlt=true` is ignored), highlighting returns whole values rather than fragments, spellcheck has no collations, analyzer components Python lacks are skipped, and JSON facets stop at `sum` and `terms` (no nested facets, `avg`, `min`, `max`, `unique`); the whole store file is rewritten on every update request and the index is rebuilt in full after a change. Unlike Python, a field the schema does not define is an error, as in real Solr (checked against Solr 10.1 with `e2e/probes.py`): HTTP 400 with `error.msg` `undefined field nosuch` for a query clause (`q`, `fq`, `df`, wildcards, `{!terms}`, facet queries, `delete` by query), `undefined field: \"nosuch\"` for a range, `{!field}`, `{!prefix}`, `facet.field` and JSON facets, `sort param field can't be found: nosuch` for `sort`, and `Query Field 'nosuch' is not a valid field name` for an edismax `qf`. Python logs a warning and treats just that clause as matching nothing. Edismax still reads `nosuch:foo` as text, ignores an undefined `pf` field and a range on one, and `fl` ignores unknown names, all as Solr does. Unlike Solr, a failing facet or highlighting request carries no partial `response`, and an undefined field inside `bf`, `boost` or a sort function is not rejected. Other features Python only warns about (a bare term with no default field, a range on a text field, an unknown `{!type}`) still return an empty result with a `warning`.
 
 ## Credits and license
 

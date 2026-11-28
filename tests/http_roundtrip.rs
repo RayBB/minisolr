@@ -684,7 +684,6 @@ fn select_highlighting_spellcheck_and_ignored_features() -> TestResult {
         (200, &serde_json::json!({}))
     );
     for bad in [
-        "q=nope:x",
         "q=type:work&group=true",
         "q={!bad",
         "q=type:work&json.facet=%7B%7D",
@@ -694,6 +693,32 @@ fn select_highlighting_spellcheck_and_ignored_features() -> TestResult {
         assert_eq!(status, 200, "{bad}");
         assert_eq!(j["response"]["numFound"], 0, "{bad}");
         assert!(j["responseHeader"]["warning"].is_string(), "{bad}");
+    }
+    // A field the schema does not define is an HTTP 400, as in real Solr.
+    for (url, msg) in [
+        ("q=nope:x", "undefined field nope"),
+        (
+            "q=type:work&sort=nope+desc",
+            "sort param field can't be found: nope",
+        ),
+        (
+            "q=*:*&facet=true&facet.field=nope",
+            "undefined field: \"nope\"",
+        ),
+    ] {
+        let (status, j) = get(&format!("{core}/select?{url}"))?;
+        assert_eq!(status, 400, "{url}");
+        assert_eq!(j["responseHeader"]["status"], 400, "{url}");
+        assert_eq!(j["error"]["msg"], msg, "{url}");
+        assert_eq!(j["error"]["code"], 400, "{url}");
+        assert_eq!(
+            j["error"]["errorClass"],
+            "org.apache.solr.common.SolrException"
+        );
+        assert_eq!(
+            j["error"]["metadata"]["error-class"],
+            "org.apache.solr.common.SolrException"
+        );
     }
     Ok(())
 }

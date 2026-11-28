@@ -118,10 +118,12 @@ impl Compiler<'_> {
             "terms" => self.terms(local, v),
             "field" => {
                 let field = required(local, "f")?;
+                self.store.require_defined(field)?;
                 self.leaf(field, v, ctx, LeafOpts::default())
             }
             "prefix" => {
                 let field = required(local, "f")?;
+                self.store.require_defined(field)?;
                 self.leaf(field, &format!("{v}*"), ctx, LeafOpts::default())
             }
             "parent" => {
@@ -150,7 +152,7 @@ impl Compiler<'_> {
             v.split(separator).filter(|x| !x.is_empty()).collect()
         };
         let Some(def) = self.store.schema.get(name) else {
-            return Ok(Some(Box::new(EmptyQuery)));
+            return Err(Error::BadRequest(format!("undefined field {name}")));
         };
         let Some(indexed) = self.store.fields.get(name) else {
             return Ok(Some(Box::new(EmptyQuery)));

@@ -10,6 +10,7 @@ use std::cmp::Ordering;
 
 use serde_json::Value;
 
+use crate::Error;
 use crate::analysis::fold;
 use crate::function::ast::Expr;
 use crate::function::parse::parse as parse_function;
@@ -40,8 +41,6 @@ enum By<'a> {
 /// How a string field's values compare.
 #[derive(Debug)]
 enum FieldOrder<'a> {
-    /// A name the schema does not define: lowercased.
-    Unknown,
     /// Position in `enumsConfig.xml` (-1 for values not listed).
     Enum(&'a [String]),
     /// ICU collation approximated by folding.
@@ -70,26 +69,29 @@ impl SortValue {
 /// Parses `sort`: items split on commas outside parentheses, each `expr direction` split
 /// at the last space; only `desc` (any case) is descending. An item without a space is
 /// Python's `rpartition` result: an empty expression, which no document has.
+///
+/// # Errors
+/// [`Error::BadRequest`] for a field the schema does not define, as Solr.
 pub(super) fn parse_sort<'a>(
     store: &'a Index,
     spec: &'a str,
     params: &'a Params,
-) -> Vec<SortKey<'a>> {
+) -> Result<Vec<SortKey<'a>>, Error> {
     split_top_level(spec)
         .map(str::trim)
         .filter(|item| !item.is_empty())
         .map(|item| {
             let (expr, direction) = item.rsplit_once(' ').unwrap_or(("", item));
-            SortKey {
-                by: by(store, expr.trim(), params),
+            Ok(SortKey {
+                by: by(store, expr.trim(), params)?,
                 descending: direction.eq_ignore_ascii_case("desc"),
-            }
+            })
         })
         .collect()
 }
 
-fn by<'a>(store: &'a Index, expr: &'a str, params: &'a Params) -> By<'a> {
-    if expr == "score" {
+fn by<'a>(store: &'a Index, expr: &'a str, params: &'a Params) -> Result<By<'a>, Error> {
+    Ok(if expr == "score" {
         By::Score
     } else if expr.starts_with("random_") {
         By::Random(expr)
@@ -97,7 +99,12 @@ fn by<'a>(store: &'a Index, expr: &'a str, params: &'a Params) -> By<'a> {
         By::Function(parse_function(expr, params))
     } else {
         let order = match store.schema.get(expr) {
-            None => FieldOrder::Unknown,
+            None if expr.is_empty() => FieldOrder::Plain,
+            None => {
+                return Err(Error::BadRequest(format!(
+                    "sort param field can't be found: {expr}"
+                )));
+            }
             Some(f) => match f.kind {
                 Kind::Enum => FieldOrder::Enum(
                     store
@@ -110,7 +117,7 @@ fn by<'a>(store: &'a Index, expr: &'a str, params: &'a Params) -> By<'a> {
             },
         };
         By::Field(expr, order)
-    }
+    })
 }
 
 /// Splits on commas at parenthesis depth 0. (Python's regex split also splits inside a
@@ -177,7 +184,6 @@ fn field_value(doc: &Value, name: &str, order: &FieldOrder<'_>) -> Option<SortVa
         Value::Number(n) => n.as_f64().map(SortValue::Number),
         Value::Bool(b) => Some(SortValue::Number(f64::from(u8::from(*b)))),
         Value::String(s) => Some(match order {
-            FieldOrder::Unknown => SortValue::Text(s.to_lowercase()),
             FieldOrder::Enum(values) => {
                 let position = values.iter().position(|v| v == s);
                 SortValue::Number(
@@ -238,10 +244,6 @@ mod tests {
         assert_eq!(
             field_value(&doc, "b", &FieldOrder::Plain),
             Some(SortValue::Number(1.0))
-        );
-        assert_eq!(
-            field_value(&doc, "s", &FieldOrder::Unknown),
-            Some(SortValue::Text("éclair".into()))
         );
         assert_eq!(
             field_value(&doc, "s", &FieldOrder::Collated),

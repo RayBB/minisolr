@@ -6,7 +6,7 @@
 
 It imports `e2e/probes.py`, points `probes.BASE` at the server and calls `probes.compare()`, which runs every probe
 in order (the update lifecycle probes add and then delete a document) and compares with
-`fixtures/probes_golden.json` under its hard-check rules, printing `probes: N/66 match real Solr (hard checks); ...`.
+`fixtures/probes_golden.json` under its hard-check rules, printing `probes: N/82 match real Solr (hard checks); ...`.
 `probes.setup()` is not needed: `fixtures/docs.jsonl` already holds the list and trending state it creates.
 
 With --binary the server is started on a free port from a copy of `fixtures/docs.jsonl` in a temporary data

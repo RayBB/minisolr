@@ -62,6 +62,9 @@ pub(super) fn highlighting(store: &Index, ords: &[usize], params: &Params) -> Re
     // The terms only depend on the field, so they are worked out once per field.
     let mut wanted: Vec<(&str, &Analyzer, Vec<String>)> = Vec::new();
     for name in &fields {
+        if !name.contains('*') && store.schema.get(name).is_none() {
+            return Err(Error::BadRequest(format!("undefined field {name}")));
+        }
         let Some(def) = store.schema.get(name).filter(|f| f.kind == Kind::Text) else {
             continue;
         };
@@ -269,12 +272,20 @@ mod tests {
     }
 
     #[test]
+    fn highlighting_an_undefined_field_is_a_bad_request() {
+        let s = store();
+        let err = highlighting(&s, &[0], &params(&[("q", "tom"), ("hl.fl", "title,nope")]))
+            .expect_err("undefined field");
+        assert!(matches!(&err, Error::BadRequest(m) if m == "undefined field nope"));
+    }
+
+    #[test]
     fn highlighting_stems_and_skips_non_text_fields() {
         let s = store();
         let hl = highlighting(
             &s,
             &[0, 1, 2],
-            &params(&[("q", "run adventure"), ("hl.fl", "title,key,type,nope")]),
+            &params(&[("q", "run adventure"), ("hl.fl", "title,key,type")]),
         )
         .expect("hl");
         assert_eq!(

@@ -4,9 +4,12 @@
 //! A compiled clause is `Ok(None)` when it vanishes (analysis left no tokens, a range on
 //! an unknown field under edismax); the clause is then dropped together with its
 //! operator, as in the Python code. A clause that cannot match is an [`EmptyQuery`].
-//! Features the Python code only warns about (an undefined field, a bare term with no
-//! default field, a range on a text field, an unknown `{!type}`) are
-//! [`Error::Unsupported`] here, so the whole request answers empty with a warning.
+//! A field the schema does not define is [`Error::BadRequest`], which answers HTTP 400
+//! with Solr's own message (`undefined field nosuch`, or `undefined field: "nosuch"` for
+//! ranges, `{!field}`, `{!prefix}`, facets and `{!join}`), as real Solr does; Python
+//! minisolr only warns and matches nothing. Features that are only unsupported here (a
+//! bare term with no default field, a range on a text field, an unknown `{!type}`) are
+//! [`Error::Unsupported`], so the whole request answers empty with a warning.
 
 use std::ops::Bound;
 
@@ -272,7 +275,7 @@ impl<'p> Compiler<'p> {
     pub(super) fn leaf(&self, name: &str, text: &str, ctx: Ctx<'_>, opts: LeafOpts) -> QueryResult {
         let store = self.store;
         let Some(def) = store.schema.get(name) else {
-            return Err(Error::Unsupported(format!("undefined field {name}")));
+            return Err(Error::BadRequest(format!("undefined field {name}")));
         };
         let Some(indexed) = store.fields.get(name) else {
             return Ok(Some(Box::new(EmptyQuery)));
@@ -347,6 +350,7 @@ impl<'p> Compiler<'p> {
     /// order, numbers compare as `f64`, strings, booleans and dates as text.
     fn range(&self, name: &str, bounds: Option<&RangeBounds<'_>>) -> QueryResult {
         let store = self.store;
+        store.require_defined(name)?;
         let empty = || Ok(Some(Box::new(EmptyQuery) as Box<dyn Query>));
         let (Some(def), Some(indexed)) = (store.schema.get(name), store.fields.get(name)) else {
             return empty();
