@@ -2,8 +2,8 @@
 
 Runs inside the Python minisolr project (it imports `minisolr.schema`), so use its environment:
 
-    uv run --project ../minisolr python tools/synthetic_tokens.py ../minisolr/conf ../minisolr/fixtures/docs.jsonl > synthetic.jsonl
-    cargo run --release -- parity ../minisolr/conf synthetic.jsonl
+    uv run --project ../minisolr python tools/synthetic_tokens.py conf fixtures/docs.jsonl > synthetic.jsonl
+    cargo run --release -- parity conf synthetic.jsonl
 
 An optional third argument names a file of extra inputs, one per line (for example /usr/share/dict/words, to
 exercise the stemmers on a large vocabulary).

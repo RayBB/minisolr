@@ -1,16 +1,29 @@
 # minisolr-rs
 
-A Rust port of [minisolr](https://github.com/RayBB/minisolr), the small Solr stand-in for Open Library development. It began as a prototype of `/select` to answer two questions: how much RAM does a Rust + Tantivy version really use, and can the Solr analyzer chains be reproduced token for token. The port is complete: it is a drop-in replacement for Python minisolr in Open Library's dev stack (`make reindex-solr`, the site, the `solr-updater` daemon), at about a tenth of its memory in Docker. [PORTING.md](PORTING.md) records the steps and the measurements.
+A small Solr stand-in for Open Library development, written in Rust on [Tantivy](https://github.com/quickwit-oss/tantivy). It answers the Solr requests Open Library's dev stack makes (`make reindex-solr`, the site, the `solr-updater` daemon) from a 7.67 MB image that idles at about 5 MiB of RAM, where real Solr needs about 250 MiB. It began as a port of a Python version, [minisolr](https://github.com/RayBB/minisolr), which remains as the reference implementation. [PORTING.md](PORTING.md) records how it was built and measured.
+
+## Quick start
+
+From your Open Library checkout:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/RayBB/minisolr-rs/main/install.sh | sh          # use minisolr-rs
+docker compose up -d && docker compose run --rm home make reindex-solr
+curl -fsSL https://raw.githubusercontent.com/RayBB/minisolr-rs/main/install.sh | sh -s off   # back to real Solr
+```
+
+`install.sh` downloads one compose file to `~/.minisolr/` and sets `COMPOSE_FILE` in Open Library's git-ignored `.env`; nothing tracked in the checkout changes. (`sh -s python` selects the Python image instead.) The engines use separate data volumes, so reindex after switching. Needs Docker Compose 2.24 or newer.
 
 ## Run
 
 ```bash
-mkdir -p /tmp/ms && cp ../minisolr/fixtures/docs.jsonl /tmp/ms/
-cargo run --release -- serve ../minisolr/conf /tmp/ms 127.0.0.1:8983
+mkdir -p /tmp/ms && cp fixtures/docs.jsonl /tmp/ms/
+cargo run --release -- serve conf /tmp/ms 127.0.0.1:8983
 curl 'localhost:8983/solr/openlibrary/select?q=author_name:carroll&fq=type:work&fl=key'
 curl -X POST 'localhost:8983/solr/openlibrary/update?commit=true' -H 'Content-Type: application/json' \
   -d '{"add": {"doc": {"key": "/works/OL1W", "type": "work", "title": "x"}}, "commit": {}}'
 cargo test --release
+python3 tools/check.py   # replay the captured Open Library requests and the 66 probes; the CI gate
 ```
 
 The first argument is a Solr conf directory with `managed-schema.xml` (and optionally `enumsConfig.xml`). The second is the data directory (created if missing): the store is loaded from `<dir>/docs.jsonl` and saved there after every update request that changes something, in the same format as Python minisolr, so either server can open the other's directory. Given a `.jsonl` file instead, the server loads it and keeps updates in memory only. `minisolr-rs ping [addr]` exits 0 when the server at `addr` (default `127.0.0.1:8983`) answers `/solr/openlibrary/admin/ping`; the image uses it as its healthcheck.
@@ -47,35 +60,36 @@ COMPOSE_FILE=compose.yaml:compose.override.yaml:/path/to/minisolr-rs/compose.min
 
 Then `docker compose up -d` and `docker compose run --rm home make reindex-solr` as usual. To switch back to Python minisolr, point `COMPOSE_FILE` at `compose.minisolr.yaml` (with `MINISOLR_DIR`) instead; to go back to real Solr, remove both lines. The engines use separate volumes (`minisolr-rs-data`, `minisolr-data`, `solr-data`), so reindex after switching. The service runs with `init: true` so stops are immediate; every update request is written to disk (fsync, then rename) before it is answered, so a stop or restart never loses committed documents.
 
-Python minisolr's end-to-end harness runs the Rust server too:
+The end-to-end harness runs the complete Open Library dev stack on this image (reindex, smoke test, replay, restart, probes, the real `solr-updater`); it needs an Open Library checkout and Docker:
 
 ```bash
-cd ../minisolr && OL_DIR=/path/to/openlibrary MINISOLR_COMPOSE_FILE=$PWD/../minisolr-rs/compose.minisolr-rs.yaml \
-  MINISOLR_DIR=$PWD/../minisolr-rs python3 e2e/harness.py all-minisolr --down
+OL_DIR=/path/to/openlibrary python3 e2e/harness.py all-minisolr --down
 ```
+
+The repository carries what it is checked against: `conf/` is a copy of Open Library's Solr schema (AGPL, see `conf/README.md`), `fixtures/` holds the 447-document dev set, the 267 captured requests and real Solr's answers to them, and `e2e/` the harness.
 
 ## Tools
 
-All in `tools/`, Python. `replay.py`, `roundtrip.py`, `probes_compare.py` and `bench.py` use the standard library only (`probes_compare.py --binary` starts its own server); `compare_python.py`, `dump_tokens.py`, `synthetic_tokens.py` and `gen_unicode.py` need Python minisolr's environment.
+All in `tools/`, Python. `replay.py`, `roundtrip.py`, `probes_compare.py` and `bench.py` use the standard library only (`probes_compare.py --binary` starts its own server); `compare_python.py`, `dump_tokens.py`, `synthetic_tokens.py` and `gen_unicode.py` need the Python reference implementation checked out next to this repository as `../minisolr`.
 
 ```bash
 # correctness against real Solr's captured answers (the main progress meter)
-python3 tools/replay.py http://127.0.0.1:8983/solr/openlibrary ../minisolr/fixtures [--probes] [-v] [--subset-out answered.json]
+python3 tools/replay.py http://127.0.0.1:8983/solr/openlibrary fixtures [--probes] [-v] [--subset-out answered.json]
 # same answers as Python minisolr? (runs Python minisolr in-process; --neutral turns its boosts off)
-uv run --project ../minisolr python tools/compare_python.py http://127.0.0.1:8983/solr/openlibrary ../minisolr [--neutral]
+uv run --project ../minisolr python tools/compare_python.py http://127.0.0.1:8983/solr/openlibrary . [--neutral]
 # reindex an empty server through /update (works with nested editions, repeated `add` keys), then compare two servers
-python3 tools/roundtrip.py load http://127.0.0.1:8984/solr/openlibrary ../minisolr/fixtures/docs.jsonl
-python3 tools/roundtrip.py compare http://127.0.0.1:8983/solr/openlibrary http://127.0.0.1:8984/solr/openlibrary ../minisolr/fixtures
+python3 tools/roundtrip.py load http://127.0.0.1:8984/solr/openlibrary fixtures/docs.jsonl
+python3 tools/roundtrip.py compare http://127.0.0.1:8983/solr/openlibrary http://127.0.0.1:8984/solr/openlibrary fixtures
 # all 66 e2e probes through e2e/probes.py's compare(), on a server started from a copy of the fixtures
-python3 tools/probes_compare.py ../minisolr --binary target/release/minisolr-rs   # or --url http://...
+python3 tools/probes_compare.py . --binary target/release/minisolr-rs   # or --url http://...
 # memory and latency over the answerable requests
 python3 tools/bench.py http://127.0.0.1:8983/solr/openlibrary <pid> answered.json 1300
 # analyzer parity with Python minisolr, over every text field in the data
-uv run --project ../minisolr python tools/dump_tokens.py ../minisolr/conf ../minisolr/fixtures/docs.jsonl > tokens.jsonl
-cargo run --release -- parity ../minisolr/conf tokens.jsonl
+uv run --project ../minisolr python tools/dump_tokens.py conf fixtures/docs.jsonl > tokens.jsonl
+cargo run --release -- parity conf tokens.jsonl
 # the same for index and query tokens of every text field type over a broad synthetic set (optional extra word list)
-uv run --project ../minisolr python tools/synthetic_tokens.py ../minisolr/conf ../minisolr/fixtures/docs.jsonl [/usr/share/dict/words] > synthetic.jsonl
-cargo run --release -- parity ../minisolr/conf synthetic.jsonl
+uv run --project ../minisolr python tools/synthetic_tokens.py conf fixtures/docs.jsonl [/usr/share/dict/words] > synthetic.jsonl
+cargo run --release -- parity conf synthetic.jsonl
 # regenerate the Unicode tables from Python's unicodedata
 uv run --project ../minisolr python tools/gen_unicode.py > src/unicode/table.rs
 ```
@@ -128,7 +142,7 @@ An undefined field, a bare term with no default field, a range on a text field, 
 
 ## Measurements in Docker (Open Library's dev stack, OrbStack on an Apple Silicon Mac)
 
-Python minisolr's `e2e/harness.py all-minisolr --down` with this compose override, two complete runs, every checklist item PASS in both: `make reindex-solr` 446 documents (35 works, 68 editions, 34 authors through the JSON Request/Facet API, 309 subjects), site smoke test 86/86, replay `numFound` 267/267, top-10 overlap 98.76%, facets 6/6, `/get` 41/41, the same after `docker compose restart solr`, probes 66/66 against real Solr (the same 10 soft notes as Python), and the real `solr-updater` daemon (an edited work and a new list searchable after 9 s, a deleted list gone).
+`e2e/harness.py all-minisolr --down` with this compose override, two complete runs, every checklist item PASS in both: `make reindex-solr` 446 documents (35 works, 68 editions, 34 authors through the JSON Request/Facet API, 309 subjects), site smoke test 86/86, replay `numFound` 267/267, top-10 overlap 98.76%, facets 6/6, `/get` 41/41, the same after `docker compose restart solr`, probes 66/66 against real Solr (the same 10 soft notes as Python), and the real `solr-updater` daemon (an edited work and a new list searchable after 9 s, a deleted list gone).
 
 | | minisolr-rs | Python minisolr |
 |---|---|---|
@@ -173,4 +187,4 @@ As in Python: MoreLikeThis returns nothing (`/mlt` is empty, `mlt=true` is ignor
 
 ## Credits and license
 
-MIT, see [LICENSE](LICENSE). The reference implementation, the fixtures and the end-to-end harness live in [minisolr](https://github.com/RayBB/minisolr); the offline tools here (`tools/`) and the commands above assume it is checked out next to this repository as `../minisolr`. Built with Claude Code.
+MIT, see [LICENSE](LICENSE). The Python reference implementation lives in [minisolr](https://github.com/RayBB/minisolr); only the comparison tools in `tools/` need it, checked out next to this repository as `../minisolr`. Built with Claude Code.

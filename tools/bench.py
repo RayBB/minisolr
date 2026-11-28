@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Measure a running server's memory and latency over a replayed request set (standard library only).
 
-    python3 tools/replay.py URL ../minisolr/fixtures --subset-out answered.json
+    python3 tools/replay.py URL fixtures --subset-out answered.json
     python3 tools/bench.py URL PID answered.json 1300
 
 Prints RSS (`ps -o rss=`) and macOS `footprint` after one warm-up query and again after N queries

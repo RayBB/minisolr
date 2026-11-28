@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Run all of Python minisolr's e2e feature probes (e2e/probes.py) against a minisolr-rs server, as the Docker harness does.
 
-    python3 tools/probes_compare.py ../minisolr --binary target/release/minisolr-rs   # starts its own server
-    python3 tools/probes_compare.py ../minisolr --url http://127.0.0.1:8983/solr/openlibrary
+    python3 tools/probes_compare.py . --binary target/release/minisolr-rs   # starts its own server
+    python3 tools/probes_compare.py . --url http://127.0.0.1:8983/solr/openlibrary
 
 It imports `e2e/probes.py`, points `probes.BASE` at the server and calls `probes.compare()`, which runs every probe
 in order (the update lifecycle probes add and then delete a document) and compares with

@@ -1,2 +1,4 @@
 target
 __pycache__
+.e2e/
+__pycache__/

@@ -1,0 +1,30 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test --release
+  replay:
+    name: replay and probes against captured Solr answers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release
+      - run: python3 tools/check.py

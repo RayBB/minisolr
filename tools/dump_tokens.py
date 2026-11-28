@@ -2,8 +2,8 @@
 
 Runs inside the Python minisolr project (it imports `minisolr.schema`), so use its environment:
 
-    uv run --project ../minisolr python tools/dump_tokens.py ../minisolr/conf ../minisolr/fixtures/docs.jsonl > tokens.jsonl
-    cargo run --release -- parity ../minisolr/conf tokens.jsonl
+    uv run --project ../minisolr python tools/dump_tokens.py conf fixtures/docs.jsonl > tokens.jsonl
+    cargo run --release -- parity conf tokens.jsonl
 
 Each document is expanded with copyFields first (like `Store._effective`), so copy destinations such
 as `title_suggest` are covered too. Every field whose schema kind is `text` is dumped, static or

@@ -3,7 +3,7 @@
 
 Python minisolr runs in-process (so run this with its environment), on a copy of the dev data:
 
-    uv run --project ../minisolr python tools/compare_python.py http://127.0.0.1:8983/solr/openlibrary ../minisolr
+    uv run --project ../minisolr python tools/compare_python.py http://127.0.0.1:8983/solr/openlibrary .
     ... --neutral     # Python's function boosts evaluate to 1 (to separate parser from boost differences)
 
 Only requests the Rust server answers (no `warning`) are compared. Prints each request whose top-10 keys

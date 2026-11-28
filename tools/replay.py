@@ -4,7 +4,7 @@
 Standard library only; it starts nothing. Point it at any Solr-compatible core (minisolr-rs,
 Python minisolr or Solr itself) and at minisolr's fixtures directory:
 
-    python3 tools/replay.py http://127.0.0.1:8983/solr/openlibrary ../minisolr/fixtures
+    python3 tools/replay.py http://127.0.0.1:8983/solr/openlibrary fixtures
     python3 tools/replay.py URL FIXTURES --probes      # also the select-kind feature probes
     python3 tools/replay.py URL FIXTURES -v            # list every miss and unanswered request
     python3 tools/replay.py URL FIXTURES --subset-out answered.json   # params of answerable requests

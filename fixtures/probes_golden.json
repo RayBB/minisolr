@@ -1,0 +1,1008 @@
+{
+ "bool field": {
+  "keys": [
+   "/works/OL15150515W",
+   "/works/OL313321W",
+   "/works/OL16086453W",
+   "/works/OL53924W",
+   "/works/OL54120W",
+   "/works/OL16075717W",
+   "/works/OL13101191W",
+   "/works/OL61982W",
+   "/works/OL73243W",
+   "/works/OL5702375W"
+  ],
+  "numFound": 26
+ },
+ "carousel trending": {
+  "keys": [
+   "/works/OL53924W",
+   "/works/OL45310W"
+  ],
+  "numFound": 2
+ },
+ "child transformer": {
+  "keys": [
+   "/works/OL45310W"
+  ],
+  "numFound": 1
+ },
+ "cursorMark": {
+  "cursor_advances": true,
+  "keys": [
+   "/authors/OL1385835A",
+   "/authors/OL1388798A",
+   "/authors/OL1434011A",
+   "/authors/OL1518080A",
+   "/authors/OL18283A"
+  ],
+  "numFound": 34
+ },
+ "edismax accents": {
+  "keys": [
+   "/works/OL286730W"
+  ],
+  "numFound": 1
+ },
+ "edismax bf": {
+  "keys": [
+   "/authors/OL18319A"
+  ],
+  "numFound": 1
+ },
+ "edismax mm=1 OR": {
+  "keys": [
+   "/works/OL118420W",
+   "/works/OL13101191W",
+   "/works/OL15298516W",
+   "/works/OL53924W",
+   "/works/OL54120W",
+   "/works/OL8193488W"
+  ],
+  "numFound": 6
+ },
+ "edismax mm=100%": {
+  "keys": [
+   "/works/OL8193488W",
+   "/works/OL53924W"
+  ],
+  "numFound": 2
+ },
+ "edismax mm=2": {
+  "keys": [
+   "/works/OL8193488W",
+   "/works/OL53924W"
+  ],
+  "numFound": 2
+ },
+ "edismax pf+pf2+boost": {
+  "keys": [
+   "/works/OL8193488W",
+   "/works/OL53924W"
+  ],
+  "numFound": 2
+ },
+ "edismax possessive/stem": {
+  "keys": [
+   "/works/OL20600W"
+  ],
+  "numFound": 1
+ },
+ "edismax single": {
+  "keys": [
+   "/works/OL53924W",
+   "/works/OL54120W",
+   "/works/OL8193488W"
+  ],
+  "numFound": 3
+ },
+ "edismax stopword-only": {
+  "keys": [
+   "/works/OL73243W",
+   "/works/OL53924W",
+   "/works/OL313321W",
+   "/works/OL15298516W",
+   "/works/OL151880W",
+   "/works/OL15150515W",
+   "/works/OL15673999W",
+   "/works/OL16086453W",
+   "/works/OL15706726W",
+   "/works/OL54120W"
+  ],
+  "numFound": 19
+ },
+ "edismax two terms AND": {
+  "keys": [
+   "/works/OL53924W",
+   "/works/OL54120W",
+   "/works/OL8193488W"
+  ],
+  "numFound": 3
+ },
+ "edismax unknown field text": {
+  "keys": [],
+  "numFound": 0
+ },
+ "edismax wdgf": {
+  "keys": [
+   "/works/OL15437498W"
+  ],
+  "numFound": 1
+ },
+ "exists wildcard": {
+  "keys": [
+   "/works/OL15150515W",
+   "/works/OL313321W",
+   "/works/OL16086453W",
+   "/works/OL53924W",
+   "/works/OL54120W",
+   "/works/OL16075717W",
+   "/works/OL13101191W",
+   "/works/OL61982W",
+   "/works/OL73243W",
+   "/works/OL5702375W"
+  ],
+  "numFound": 26
+ },
+ "export": {
+  "docs": [
+   {
+    "edition_count": 1,
+    "key": "/works/OL118420W"
+   },
+   {
+    "edition_count": 1,
+    "key": "/works/OL13101191W"
+   },
+   {
+    "edition_count": 1,
+    "key": "/works/OL14930766W"
+   },
+   {
+    "edition_count": 1,
+    "key": "/works/OL15150515W"
+   },
+   {
+    "edition_count": 1,
+    "key": "/works/OL151880W"
+   },
+   {
+    "edition_count": 1,
+    "key": "/works/OL15298516W"
+   },
+   {
+    "edition_count": 1,
+    "key": "/works/OL15400392W"
+   },
+   {
+    "edition_count": 1,
+    "key": "/works/OL15437498W"
+   },
+   {
+    "edition_count": 1,
+    "key": "/works/OL15547698W"
+   },
+   {
+    "edition_count": 1,
+    "key": "/works/OL15673999W"
+   }
+  ],
+  "keys": [
+   "/works/OL118420W",
+   "/works/OL13101191W",
+   "/works/OL14930766W",
+   "/works/OL15150515W",
+   "/works/OL151880W",
+   "/works/OL15298516W",
+   "/works/OL15400392W",
+   "/works/OL15437498W",
+   "/works/OL15547698W",
+   "/works/OL15673999W"
+  ],
+  "numFound": 35
+ },
+ "facet field limit/sort": {
+  "facet_fields": {
+   "subject_facet": [
+    [
+     "Protected DAISY",
+     17
+    ],
+    [
+     "Lending library",
+     15
+    ],
+    [
+     "Accessible book",
+     14
+    ],
+    [
+     "In library",
+     9
+    ],
+    [
+     "Fiction",
+     8
+    ],
+    [
+     "Juvenile fiction",
+     6
+    ],
+    [
+     "Juvenile literature",
+     6
+    ],
+    [
+     "OverDrive",
+     6
+    ],
+    [
+     "Classic Literature",
+     5
+    ],
+    [
+     "Specimens",
+     5
+    ]
+   ]
+  },
+  "facet_queries": {},
+  "keys": [],
+  "numFound": 35
+ },
+ "facet flat nl": {
+  "facet_fields": {
+   "language": [
+    "eng",
+    21,
+    "tel",
+    3,
+    "ben",
+    1,
+    "guj",
+    1,
+    "kan",
+    1,
+    "mal",
+    1,
+    "spa",
+    1,
+    "und",
+    1
+   ]
+  },
+  "facet_queries": {},
+  "keys": [],
+  "numFound": 35
+ },
+ "facet index sort offset": {
+  "facet_fields": {
+   "subject_facet": [
+    [
+     "Adventure and adventurers",
+     2
+    ],
+    [
+     "Adventure and adventurers in fiction",
+     1
+    ],
+    [
+     "Adventure stories",
+     1
+    ],
+    [
+     "Alice (Fictitious character : Carrol)",
+     1
+    ],
+    [
+     "Alice (Fictitious character : Carroll)",
+     2
+    ]
+   ]
+  },
+  "facet_queries": {},
+  "keys": [],
+  "numFound": 35
+ },
+ "facet multi + per-field": {
+  "facet_fields": {
+   "author_facet": [
+    [
+     "OL18319A Mark Twain",
+     3
+    ],
+    [
+     "OL22098A Lewis Carroll",
+     2
+    ],
+    [
+     "OL1385835A Alexis Harrington",
+     1
+    ]
+   ],
+   "has_fulltext": [
+    [
+     "true",
+     26
+    ],
+    [
+     "false",
+     9
+    ]
+   ],
+   "language": [
+    [
+     "eng",
+     21
+    ],
+    [
+     "tel",
+     3
+    ],
+    [
+     "ben",
+     1
+    ],
+    [
+     "guj",
+     1
+    ],
+    [
+     "kan",
+     1
+    ],
+    [
+     "mal",
+     1
+    ],
+    [
+     "spa",
+     1
+    ],
+    [
+     "und",
+     1
+    ]
+   ]
+  },
+  "facet_queries": {},
+  "keys": [],
+  "numFound": 35
+ },
+ "facet prefix": {
+  "facet_fields": {
+   "subject_facet": []
+  },
+  "facet_queries": {},
+  "keys": [],
+  "numFound": 35
+ },
+ "facet query": {
+  "facet_fields": {},
+  "facet_queries": {
+   "edition_count:[2 TO *]": 7,
+   "has_fulltext:true": 26
+  },
+  "keys": [],
+  "numFound": 35
+ },
+ "facet zero counts": {
+  "facet_fields": {
+   "language": [
+    [
+     "mal",
+     2
+    ],
+    [
+     "ben",
+     0
+    ],
+    [
+     "eng",
+     0
+    ],
+    [
+     "guj",
+     0
+    ],
+    [
+     "kan",
+     0
+    ],
+    [
+     "spa",
+     0
+    ],
+    [
+     "tel",
+     0
+    ],
+    [
+     "und",
+     0
+    ]
+   ]
+  },
+  "facet_queries": {},
+  "keys": [],
+  "numFound": 2
+ },
+ "get ids": {
+  "doc": null,
+  "docs": [
+   {
+    "key": "/works/OL45310W",
+    "title": "Robinson Crusoe"
+   },
+   {
+    "key": "/works/OL53924W",
+    "title": "The complete works of Mark Twain"
+   }
+  ]
+ },
+ "get single": {
+  "doc": {
+   "edition_count": 1,
+   "key": "/works/OL45310W",
+   "title": "Robinson Crusoe"
+  }
+ },
+ "highlight": {
+  "highlighting": {
+   "/works/OL53924W": {
+    "chapter": [
+     "OL22782947M |  | - [v.1.] The adventures of Tom <em>Sawyer</em>. - [v.2.] The innocents abroad. - [v.3.] Pudd'nhead Wilson. - [v.4.] The American claimant. - [v.5.] Connecticut Yankee in King Arthur's court. - [v.6.] Roughing it. - [v.7.] Life on the Mississippi. - [v.8.] The mysterious stranger. - [v.9.] The adventures of Huckleberry Finn. - [v.10.] The gilded age. - [v.11.] A tramp abroad. -[v.12.] What is man? - [v.13.] Following the equator. - [v.14.] Tom <em>Sawyer</em> abroad. - [v.15.] The man that corrupted Hadleybrug. - [v.16.] In defense of Harriet Shelley. - [v.17.] Joan of Arc. - [v.18.] The 30,000 bequest. - [v.19.] Sketches, new and old. - [v.20.] Europe and elsewhere. - [v.21.] - The Prince and the pauper. - [v.22.] Mark Twain's notebook. - [v.23.] Christian Science. -[v.24.] Mark Twain's speeches | ",
+     "OL13569660M |  | Tom <em>Sawyer</em> abroad -- | ",
+     "OL24197430M |  | - [v. 1-2] Autobiography. - [v. 1.] The adventures of Tom <em>Sawyer</em>. -[v. 2.] The innocents abroad. - [v. 3.] Pudd'nhead Wilson. - [v. 4.] The American claimant. - [v. 5.] Connecticut Yankee in King Arthur's court. - [v. 6.] Roughing it. - [v. 7.] Life on the Mississippi. - [v. 8.] The mysterious stranger. -[v. 9.] The adventures of Huckleberry Finn. - [v. 10.] The gilded age. - [v. 11.] A tramp abroad. -[v. 12.] What is man? - [v. 13.] Following the equator. -[v. 14.] Tom <em>Sawyer</em> abroad. - [v. 15.] The man that corrupted Hadleybrug. -[v. 16.] In defense of Harriet Shelley. - [v. 17.] Joan of Arc. -[v. 18.] The 30,000 bequest. - [v. 19.] Sketches, new and old. - [v. 20.] Europe and elsewhere. - [v. 21.] - The Prince and the pauper. - [v. 22.] Mark Twain's notebook. - [v. 23.] Christian Science. -[v. 24.] Mark Twain's speeches. | ",
+     "OL7037695M |  | - Autobiography. - [v.1.] The adventures of Tom <em>Sawyer</em>. -[v.2.] The innocents abroad. - [v.3.] Pudd'nhead Wilson. - [v.4.] The American claimant. - [v.5.] Connecticut Yankee in King Arthur's court. -[v.6.] Roughing it. - [v.7.] Life on the Mississippi. - [v.8.] The mysterious stranger. -[v.9.] The adventures of Huckleberry Finn. - [v.10.] The gilded age. - [v.11.] A tramp abroad. -[v.12.] What is man? - [v.13.] Following the equator. -[v.14.] Tom <em>Sawyer</em> abroad. - [v.15.] The man that corrupted Hadleybrug. -[v.16.] In defense of Harriet Shelley. - [v.17.] Joan of Arc. -  [v.18.] The 30,000 bequest. - [v.19.] Sketches, new and old. - [v.20.] Europe and elsewhere. - [v.21.] - The Prince and the pauper. - [v.22.] Mark Twain's notebook. - [v.23.] Christian Science. -[v.24.] Mark Twain's speeches. | ",
+     "OL13569660M |  | The Adventures of Tom <em>Sawyer</em> -- | "
+    ]
+   },
+   "/works/OL8193488W": {
+    "title": [
+     "Adventures of Tom <em>Sawyer</em>"
+    ]
+   }
+  },
+  "keys": [
+   "/works/OL8193488W",
+   "/works/OL53924W"
+  ],
+  "numFound": 2
+ },
+ "highlight subject": {
+  "highlighting": {
+   "/works/OL118420W": {
+    "subject": [
+     "<em>Fiction</em>",
+     "Science <em>Fiction</em>",
+     "Historical <em>Fiction</em>"
+    ]
+   },
+   "/works/OL13101191W": {
+    "subject": [
+     "English Fantasy <em>fiction</em>",
+     "Fantasy <em>fiction</em>, Greek (Modern)",
+     "<em>Fiction</em>",
+     "Fantasy <em>fiction</em>",
+     "Humor (<em>Fiction</em>)",
+     "Fantasy in <em>fiction</em>",
+     "Greek Fantastic <em>fiction</em>",
+     "Juvenile <em>fiction</em>",
+     "English Fantastic <em>fiction</em>"
+    ]
+   },
+   "/works/OL151880W": {
+    "subject": [
+     "<em>Fiction</em>",
+     "Juvenile <em>fiction</em>"
+    ]
+   },
+   "/works/OL15298516W": {
+    "subject": [
+     "<em>Fiction</em>",
+     "Juvenile <em>fiction</em>"
+    ]
+   },
+   "/works/OL1898308W": {
+    "subject": [
+     "<em>Fiction</em>",
+     "Juvenile <em>fiction</em>"
+    ]
+   },
+   "/works/OL20600W": {
+    "subject": [
+     "Fantasy  <em>fiction</em>",
+     "<em>Fiction</em>",
+     "<em>Fiction</em> in English",
+     "Juvenile <em>fiction</em>",
+     "Fantasy <em>fiction</em>"
+    ]
+   },
+   "/works/OL45310W": {
+    "subject": [
+     "<em>Fiction</em>",
+     "Juvenile <em>fiction</em>",
+     "Islands in <em>fiction</em>",
+     "Castaways in <em>fiction</em>",
+     "Survival in <em>fiction</em>",
+     "Shipwrecks in <em>fiction</em>",
+     "Solitude in <em>fiction</em>",
+     "British in <em>fiction</em>",
+     "Pirates in <em>fiction</em>",
+     "<em>Fiction</em> in Spanish"
+    ]
+   },
+   "/works/OL61982W": {
+    "subject": [
+     "<em>Fiction</em>"
+    ]
+   }
+  },
+  "keys": [
+   "/works/OL45310W",
+   "/works/OL151880W",
+   "/works/OL118420W",
+   "/works/OL13101191W",
+   "/works/OL1898308W",
+   "/works/OL15298516W",
+   "/works/OL20600W",
+   "/works/OL61982W"
+  ],
+  "numFound": 8
+ },
+ "json request + json facet": {
+  "json_facets": {
+   "count": 3,
+   "readinglog_count": 0.0,
+   "subject_facet": {
+    "buckets": [
+     {
+      "count": 1,
+      "val": "Accessible book"
+     },
+     {
+      "count": 1,
+      "val": "American Quotations"
+     },
+     {
+      "count": 1,
+      "val": "Christian Science"
+     },
+     {
+      "count": 1,
+      "val": "Description and travel"
+     },
+     {
+      "count": 1,
+      "val": "In library"
+     },
+     {
+      "count": 1,
+      "val": "Protected DAISY"
+     },
+     {
+      "count": 1,
+      "val": "Quotations"
+     },
+     {
+      "count": 1,
+      "val": "Voyages around the world"
+     }
+    ]
+   },
+   "want_to_read_count": 0.0
+  },
+  "keys": [
+   null,
+   null,
+   null
+  ],
+  "numFound": 3
+ },
+ "lifecycle: add": {
+  "status": 0
+ },
+ "lifecycle: after add": {
+  "docs": [
+   {
+    "edition_count": 1,
+    "key": "/works/OL999999W",
+    "title": "Zebra crossing handbook"
+   }
+  ],
+  "keys": [
+   "/works/OL999999W"
+  ],
+  "numFound": 1
+ },
+ "lifecycle: after atomic": {
+  "docs": [
+   {
+    "edition_count": 5,
+    "key": "/works/OL999999W",
+    "title": "Zebra crossing handbook 2nd ed"
+   }
+  ],
+  "keys": [
+   "/works/OL999999W"
+  ],
+  "numFound": 1
+ },
+ "lifecycle: after delete": {
+  "keys": [],
+  "numFound": 0
+ },
+ "lifecycle: atomic inc/set": {
+  "status": 0
+ },
+ "lifecycle: before add": {
+  "keys": [],
+  "numFound": 0
+ },
+ "lifecycle: delete by id": {
+  "status": 0
+ },
+ "lifecycle: delete by query": {
+  "status": 0
+ },
+ "list by seed": {
+  "docs": [
+   {
+    "key": "/people/openlibrary/lists/OL1L",
+    "name": "Twain and Carroll favorites",
+    "seed_count": 3
+   }
+  ],
+  "keys": [
+   "/people/openlibrary/lists/OL1L"
+  ],
+  "numFound": 1
+ },
+ "list search": {
+  "docs": [
+   {
+    "key": "/people/openlibrary/lists/OL1L",
+    "name": "Twain and Carroll favorites",
+    "seed_count": 3
+   }
+  ],
+  "keys": [
+   "/people/openlibrary/lists/OL1L"
+  ],
+  "numFound": 1
+ },
+ "local lucene tag": {
+  "keys": [
+   "/books/OL24163794M",
+   "/works/OL313321W",
+   "/books/OL24982896M",
+   "/works/OL16086453W",
+   "/books/OL22782947M",
+   "/books/OL24197430M",
+   "/books/OL13569660M",
+   "/works/OL53924W",
+   "/books/OL8011987M",
+   "/books/OL2407849M"
+  ],
+  "numFound": 68
+ },
+ "lucene +/-": {
+  "keys": [
+   "/works/OL15150515W",
+   "/works/OL313321W",
+   "/works/OL16086453W",
+   "/works/OL53924W",
+   "/works/OL54120W",
+   "/works/OL16075717W",
+   "/works/OL13101191W",
+   "/works/OL61982W",
+   "/works/OL73243W",
+   "/works/OL5702375W"
+  ],
+  "numFound": 26
+ },
+ "lucene boolean": {
+  "keys": [
+   "/works/OL286730W",
+   "/works/OL286811W",
+   "/works/OL286813W",
+   "/works/OL15150515W",
+   "/works/OL313321W",
+   "/works/OL14930766W",
+   "/works/OL286715W",
+   "/works/OL286719W",
+   "/works/OL286819W",
+   "/works/OL286855W"
+  ],
+  "numFound": 27
+ },
+ "lucene field:term": {
+  "keys": [
+   "/books/OL13517105M",
+   "/books/OL23269118M",
+   "/works/OL13101191W"
+  ],
+  "numFound": 3
+ },
+ "lucene fuzzy": {
+  "keys": [
+   "/books/OL2407849M",
+   "/books/OL2058361M",
+   "/books/OL23273793M",
+   "/works/OL53924W",
+   "/books/OL7037695M",
+   "/books/OL8011987M",
+   "/works/OL54120W",
+   "/books/OL22782947M",
+   "/books/OL24197430M",
+   "/books/OL3421846M"
+  ],
+  "numFound": 16
+ },
+ "lucene phrase": {
+  "keys": [
+   "/works/OL8193488W",
+   "/books/OL7652777M",
+   "/books/OL7652892M",
+   "/books/OL7652984M",
+   "/books/OL7652865M",
+   "/books/OL7652951M",
+   "/books/OL7653004M",
+   "/books/OL7652936M"
+  ],
+  "numFound": 8
+ },
+ "lucene phrase slop": {
+  "keys": [
+   "/books/OL2407849M",
+   "/books/OL2058361M",
+   "/books/OL23273793M",
+   "/books/OL8011987M",
+   "/works/OL54120W",
+   "/books/OL3421846M",
+   "/books/OL1890025M",
+   "/books/OL42679M",
+   "/books/OL7637879M"
+  ],
+  "numFound": 9
+ },
+ "lucene wildcard": {
+  "keys": [
+   "/books/OL24972169M",
+   "/works/OL16075717W",
+   "/books/OL20431791M",
+   "/works/OL118420W"
+  ],
+  "numFound": 4
+ },
+ "paging start/rows": {
+  "keys": [
+   "/works/OL15298516W",
+   "/works/OL15400392W",
+   "/works/OL15437498W",
+   "/works/OL15547698W",
+   "/works/OL15673999W"
+  ],
+  "numFound": 35
+ },
+ "parent join + subquery": {
+  "editions": [
+   [
+    "/books/OL22782947M",
+    "/books/OL24197430M"
+   ],
+   [
+    "/books/OL8011987M",
+    "/books/OL2407849M"
+   ],
+   [
+    "/books/OL7652777M",
+    "/books/OL7652892M"
+   ]
+  ],
+  "keys": [
+   "/works/OL53924W",
+   "/works/OL54120W",
+   "/works/OL8193488W"
+  ],
+  "numFound": 3
+ },
+ "range enum": {
+  "keys": [
+   "/works/OL15150515W",
+   "/works/OL313321W",
+   "/works/OL16086453W",
+   "/works/OL53924W",
+   "/works/OL54120W",
+   "/works/OL16075717W",
+   "/works/OL13101191W",
+   "/works/OL61982W",
+   "/works/OL73243W",
+   "/works/OL5702375W"
+  ],
+  "numFound": 26
+ },
+ "range numeric excl": {
+  "keys": [
+   "/works/OL286730W",
+   "/works/OL286811W",
+   "/works/OL286813W",
+   "/works/OL15150515W",
+   "/works/OL313321W",
+   "/works/OL14930766W",
+   "/works/OL286715W",
+   "/works/OL286719W",
+   "/works/OL286819W",
+   "/works/OL286855W"
+  ],
+  "numFound": 18
+ },
+ "range numeric incl": {
+  "keys": [
+   "/works/OL286730W",
+   "/works/OL286811W",
+   "/works/OL286813W",
+   "/works/OL15150515W",
+   "/works/OL313321W",
+   "/works/OL14930766W",
+   "/works/OL286715W",
+   "/works/OL286719W",
+   "/works/OL286819W",
+   "/works/OL286855W"
+  ],
+  "numFound": 18
+ },
+ "range open": {
+  "keys": [
+   "/works/OL53924W",
+   "/works/OL54120W",
+   "/works/OL5702375W",
+   "/works/OL8193488W"
+  ],
+  "numFound": 4
+ },
+ "sort function trending": {
+  "keys": [
+   "/works/OL53924W",
+   "/works/OL45310W",
+   "/works/OL118420W",
+   "/works/OL13101191W",
+   "/works/OL14930766W"
+  ],
+  "numFound": 35
+ },
+ "sort number desc": {
+  "keys": [
+   "/works/OL5702375W",
+   "/works/OL54120W",
+   "/works/OL8193488W",
+   "/works/OL53924W",
+   "/works/OL192489W",
+   "/works/OL6037022W",
+   "/works/OL61982W",
+   "/works/OL118420W",
+   "/works/OL13101191W",
+   "/works/OL14930766W"
+  ],
+  "numFound": 35
+ },
+ "sort random": {
+  "keys": [
+   "/works/OL15706726W",
+   "/works/OL286715W",
+   "/works/OL6037022W",
+   "/works/OL15298516W",
+   "/works/OL54120W",
+   "/works/OL118420W",
+   "/works/OL15150515W",
+   "/works/OL14930766W",
+   "/works/OL286855W",
+   "/works/OL20600W"
+  ],
+  "numFound": 35
+ },
+ "sort ratings_sortable": {
+  "keys": [
+   "/authors/OL1385835A",
+   "/authors/OL1388798A",
+   "/authors/OL1434011A",
+   "/authors/OL1518080A",
+   "/authors/OL18283A",
+   "/authors/OL18319A",
+   "/authors/OL19864A",
+   "/authors/OL1A",
+   "/authors/OL20585A",
+   "/authors/OL21774A"
+  ],
+  "numFound": 34
+ },
+ "sort string key": {
+  "keys": [
+   "/works/OL8193488W",
+   "/works/OL73243W",
+   "/works/OL61982W",
+   "/works/OL6037022W",
+   "/works/OL5702375W",
+   "/works/OL5688746W",
+   "/works/OL54120W",
+   "/works/OL53924W",
+   "/works/OL45310W",
+   "/works/OL313321W"
+  ],
+  "numFound": 35
+ },
+ "sort title_sort (ICU)": {
+  "keys": [
+   "/works/OL8193488W",
+   "/works/OL13101191W",
+   "/works/OL286715W",
+   "/works/OL286819W",
+   "/works/OL313321W",
+   "/works/OL53924W",
+   "/works/OL15547698W",
+   "/works/OL16226033W",
+   "/works/OL286730W",
+   "/works/OL15706726W"
+  ],
+  "numFound": 35
+ },
+ "sort year def asc": {
+  "keys": [
+   "/works/OL20600W",
+   "/works/OL53924W",
+   "/works/OL118420W",
+   "/works/OL13101191W",
+   "/works/OL45310W",
+   "/works/OL313321W",
+   "/works/OL15298516W",
+   "/works/OL192489W",
+   "/works/OL1898308W",
+   "/works/OL15150515W"
+  ],
+  "numFound": 35
+ },
+ "spellcheck ok term": {
+  "keys": [],
+  "numFound": 3
+ },
+ "spellcheck typo": {
+  "keys": [],
+  "numFound": 0
+ },
+ "terms author_key": {
+  "keys": [
+   "/works/OL53924W",
+   "/works/OL54120W",
+   "/works/OL13101191W",
+   "/works/OL15298516W",
+   "/works/OL8193488W"
+  ],
+  "numFound": 5
+ },
+ "terms fq": {
+  "keys": [
+   "/works/OL53924W",
+   "/works/OL20600W",
+   "/works/OL45310W"
+  ],
+  "numFound": 3
+ },
+ "trending export": {
+  "docs": [
+   {
+    "key": "/works/OL45310W",
+    "trending_score_hourly_sum": 3
+   },
+   {
+    "key": "/works/OL53924W",
+    "trending_score_hourly_sum": 5
+   }
+  ],
+  "keys": [
+   "/works/OL45310W",
+   "/works/OL53924W"
+  ],
+  "numFound": 2
+ }
+}

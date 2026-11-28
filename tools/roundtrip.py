@@ -4,9 +4,9 @@
 Standard library only; it starts nothing.
 
     # rebuild every work with its editions nested, as repeated `add` commands plus `commit`
-    python3 tools/roundtrip.py load http://127.0.0.1:8984/solr/openlibrary ../minisolr/fixtures/docs.jsonl [--batch 50]
+    python3 tools/roundtrip.py load http://127.0.0.1:8984/solr/openlibrary fixtures/docs.jsonl [--batch 50]
     # same answers? every captured /select and /get, and every stored row through /export
-    python3 tools/roundtrip.py compare http://127.0.0.1:8983/solr/openlibrary http://127.0.0.1:8984/solr/openlibrary ../minisolr/fixtures
+    python3 tools/roundtrip.py compare http://127.0.0.1:8983/solr/openlibrary http://127.0.0.1:8984/solr/openlibrary fixtures
 
 `load` groups the flat rows of a minisolr docs.jsonl by `_root_`: each root row becomes one document
 (without `_root_`) whose children (without `_root_` and `_nest_path_`, in file order) go in its
