@@ -44,7 +44,7 @@ Per-run values (run 1, 2, 3):
 - Images were already present locally (warm cache). The pull time is only for minisolr (17.5 s, 7.7 MB, over this connection); real Solr's pull was not timed because `solr:10.1.0` is shared with other stacks on the machine and was not removed.
 - Only the Solr part differs. The other eight containers (about 875 MiB) are identical, and web.py/FastAPI dominate search latency, so the search timings mostly measure Open Library, not the engine.
 - arm64 only (Apple Silicon, OrbStack). Not tested on Intel, Linux or Docker Desktop.
-- The idle sample was taken 60 s after the reindex and 20 searches, not 60 s after the site first became healthy. Solr's number depends on the 128m heap set in `compose.override.yaml`; the README's older figure of about 250 MiB for Solr does not match this measurement (405 MiB).
+- The idle sample was taken 60 s after the reindex and 20 searches, not 60 s after the site first became healthy. Solr's number depends on the 128m heap set in `compose.override.yaml`.
 - Docker VM memory used was not measured; only per-container `docker stats` figures are reported.
 - No like-for-like Solr volume size: my measurement of it failed (du ran as a non-root user), and the repeat run was abandoned when another session started an unrelated stack on the machine. For orientation only, the Solr data volume of another, stopped project here (`solr:10.1.0`, unknown document count) was about 1.5 MB. At this data size both volumes are tiny.
 - A first attempt at the second real Solr run crashed in the benchmark script after measuring (a bug in the volume check), so the later runs were repeated. The table uses one A and one B run from the first pass and the other two of each from the second.

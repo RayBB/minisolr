@@ -1,6 +1,6 @@
 # minisolr
 
-A small Solr stand-in for Open Library development, written in Rust on [Tantivy](https://github.com/quickwit-oss/tantivy). It answers the Solr requests Open Library's dev stack makes (`make reindex-solr`, the site, the `solr-updater` daemon) from a 7.67 MB image that idles at about 5 MiB of RAM, where real Solr needs about 250 MiB. It began as a port of a Python prototype that has since been retired. [PORTING.md](PORTING.md) records how it was built and measured.
+A small Solr stand-in for Open Library development, written in Rust on [Tantivy](https://github.com/quickwit-oss/tantivy). It answers the Solr requests Open Library's dev stack makes (`make reindex-solr`, the site, the `solr-updater` daemon) from a 7.67 MB image that idles at about 6 MiB of RAM, where real Solr in the dev stack uses about 400 MiB (see [docs/BENEFIT.md](docs/BENEFIT.md)). It began as a port of a Python prototype that has since been retired. [PORTING.md](PORTING.md) records how it was built and measured.
 
 Measured benefit for an Open Library developer (memory, disk, start-up, with noise and caveats): [docs/BENEFIT.md](docs/BENEFIT.md).
 
