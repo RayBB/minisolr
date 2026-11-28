@@ -35,6 +35,11 @@ fn request(addr: &str, head: &str, body: &str) -> TestResult<Value> {
 /// Starts a server on a free port: a `.jsonl` file is loaded in memory, a directory is
 /// opened as a persistent data directory.
 fn start(data: &Path) -> TestResult<String> {
+    start_with(data, false)
+}
+
+/// [`start`] with strict mode on or off.
+fn start_with(data: &Path, strict: bool) -> TestResult<String> {
     let schema = Arc::new(Schema::load(Path::new("tests/data/conf"))?);
     let store = if data.is_file() {
         let mut store = Store::new(Arc::clone(&schema), None);
@@ -43,7 +48,7 @@ fn start(data: &Path) -> TestResult<String> {
     } else {
         Store::open(Arc::clone(&schema), data)?
     };
-    let core = Arc::new(Core::new(store, schema));
+    let core = Arc::new(Core::new(store, schema).with_strict(strict));
     let addr = free_addr()?;
     let bound = addr.clone();
     thread::spawn(move || serve(&core, &bound));
@@ -720,5 +725,140 @@ fn select_highlighting_spellcheck_and_ignored_features() -> TestResult {
             "org.apache.solr.common.SolrException"
         );
     }
+    Ok(())
+}
+
+/// The status, the `X-Minisolr-Warning` header (if any) and the JSON body of a GET.
+fn get_with_warning(addr: &str, path: &str) -> TestResult<(u16, Option<String>, Value)> {
+    let mut stream = TcpStream::connect(addr)?;
+    write!(
+        stream,
+        "GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+    )?;
+    let mut raw = String::new();
+    stream.read_to_string(&mut raw)?;
+    let (head, json) = raw.split_once("\r\n\r\n").ok_or("no http body")?;
+    let status = head
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .ok_or("no status")?;
+    let warning = head.lines().find_map(|l| {
+        let (name, value) = l.split_once(':')?;
+        name.eq_ignore_ascii_case("x-minisolr-warning")
+            .then(|| value.trim().to_owned())
+    });
+    Ok((status, warning, serde_json::from_str(json)?))
+}
+
+/// Unsupported features are counted, shown by `/minisolr/status` and named in the
+/// `X-Minisolr-Warning` header; the healthcheck ping is unchanged.
+#[test]
+fn unsupported_features_are_reported() -> TestResult {
+    let addr = start(Path::new("tests/data/mini.jsonl"))?;
+    let core = "/solr/openlibrary";
+    let (status, warning, j) = get_with_warning(
+        &addr,
+        &format!(
+            "{core}/select?q=type:work&rows=0&mlt=true&facet=true&facet.range=edition_count&facet.pivot=type"
+        ),
+    )?;
+    assert_eq!(status, 200);
+    assert_eq!(j["response"]["numFound"], 4);
+    assert_eq!(warning.as_deref(), Some("mlt, facet.range, facet.pivot"));
+    let (_, warning, j) =
+        get_with_warning(&addr, &format!("{core}/select?q=type:work&group=true"))?;
+    assert_eq!(warning.as_deref(), Some("param:group"));
+    assert!(j["responseHeader"]["warning"].is_string());
+    let (_, warning, _) = get_with_warning(
+        &addr,
+        &format!("{core}/select?q=type:work&sort=nofunc(1)+desc"),
+    )?;
+    assert_eq!(warning.as_deref(), Some("function:nofunc"));
+    let (_, warning, _) = get_with_warning(&addr, &format!("{core}/select?q=type:work&rows=0"))?;
+    assert_eq!(warning, None);
+    let (_, warning, _) =
+        get_with_warning(&addr, &format!("{core}/select?q=type:work&group=true"))?;
+    assert_eq!(warning.as_deref(), Some("param:group"));
+
+    let (status, warning, status_doc) = get_with_warning(&addr, "/minisolr/status")?;
+    assert_eq!((status, warning), (200, None));
+    assert_eq!(status_doc["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(status_doc["numDocs"], 8);
+    assert_eq!(status_doc["strict"], false);
+    assert!(status_doc["uptimeSeconds"].is_u64());
+    let kinds: Vec<(&str, u64)> = status_doc["unsupported"]
+        .as_array()
+        .ok_or("no list")?
+        .iter()
+        .filter_map(|e| Some((e["kind"].as_str()?, e["count"].as_u64()?)))
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            ("facet.pivot", 1),
+            ("facet.range", 1),
+            ("function:nofunc", 1),
+            ("mlt", 1),
+            ("param:group", 2)
+        ]
+    );
+    let example = status_doc["unsupported"][0]["example"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(example.contains("facet.pivot=type"), "{example}");
+
+    let (status, _, ping) = get_with_warning(&addr, &format!("{core}/admin/ping"))?;
+    assert_eq!(status, 200);
+    assert_eq!(
+        ping,
+        serde_json::json!({"responseHeader": {"status": 0, "QTime": 0}, "status": "OK"})
+    );
+    Ok(())
+}
+
+/// Strict mode answers HTTP 400 naming the kind; supported requests are untouched.
+#[test]
+fn strict_mode_rejects_unsupported_features() -> TestResult {
+    let addr = start_with(Path::new("tests/data/mini.jsonl"), true)?;
+    let core = "/solr/openlibrary";
+    for (url, kind) in [
+        ("q=type:work&group=true", "[param:group]"),
+        ("q=type:work&rows=0&mlt=true", "[mlt]"),
+        (
+            "q=type:work&rows=0&facet=true&facet.range=edition_count",
+            "[facet.range]",
+        ),
+        ("q=type:work&sort=nofunc(1)+desc", "[function:nofunc]"),
+        ("q={!bad", "[query-syntax]"),
+    ] {
+        let (status, warning, j) = get_with_warning(&addr, &format!("{core}/select?{url}"))?;
+        assert_eq!(status, 400, "{url}");
+        assert!(warning.is_some(), "{url}");
+        assert_eq!(j["error"]["code"], 400);
+        assert_eq!(j["responseHeader"]["status"], 400);
+        let msg = j["error"]["msg"].as_str().unwrap_or_default();
+        assert!(
+            msg.contains("strict mode") && msg.contains(kind),
+            "{url}: {msg}"
+        );
+    }
+    let (status, _, j) = get_with_warning(&addr, &format!("{core}/mlt?q=x"))?;
+    assert_eq!(status, 400);
+    assert!(
+        j["error"]["msg"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("[handler:mlt]")
+    );
+    let (status, warning, j) =
+        get_with_warning(&addr, &format!("{core}/select?q=type:work&rows=0"))?;
+    assert_eq!(
+        (status, warning, j["response"]["numFound"].as_u64()),
+        (200, None, Some(4))
+    );
+    let (_, _, doc) = get_with_warning(&addr, "/minisolr/status")?;
+    assert_eq!(doc["strict"], true);
+    assert!(doc["unsupported"].as_array().is_some_and(|a| a.len() >= 5));
     Ok(())
 }

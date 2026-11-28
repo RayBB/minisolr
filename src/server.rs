@@ -22,6 +22,7 @@ use crate::query::{self, Params, Selection};
 use crate::schema::Schema;
 use crate::store::Store;
 use crate::update;
+use crate::warn::{self, Registry};
 
 /// The core name in every path.
 pub const CORE: &str = "openlibrary";
@@ -39,6 +40,11 @@ pub struct Core {
     cache: Mutex<Option<Arc<Index>>>,
     /// Held while a search rebuilds the index, so only one thread builds it.
     rebuild: Mutex<()>,
+    /// Unsupported features seen in requests.
+    unsupported: Mutex<Registry>,
+    /// Answer HTTP 400 instead of an empty or partial result for unsupported features.
+    strict: bool,
+    started: Instant,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -56,7 +62,47 @@ impl Core {
             version: AtomicU64::new(version),
             cache: Mutex::new(None),
             rebuild: Mutex::new(()),
+            unsupported: Mutex::new(Registry::default()),
+            strict: false,
+            started: Instant::now(),
         }
+    }
+
+    /// Sets strict mode: a request that uses an unsupported feature answers HTTP 400
+    /// naming it.
+    #[must_use]
+    pub fn with_strict(mut self, strict: bool) -> Self {
+        self.strict = strict;
+        self
+    }
+
+    /// Counts and logs the unsupported features a request used; `request` describes it.
+    fn record_unsupported(&self, noted: &[(String, String)], request: &str) {
+        let mut registry = lock(&self.unsupported);
+        for (kind, detail) in noted {
+            let (key, count) = registry.record(kind, request);
+            if count == 1 {
+                eprintln!("UNSUPPORTED [{key}] first seen: {detail}; request: {request}");
+            } else if warn::should_log(count) {
+                eprintln!("UNSUPPORTED [{key}] seen {count} times (see /minisolr/status)");
+            }
+        }
+    }
+
+    /// The `/minisolr/status` document.
+    fn status(&self) -> Value {
+        let unsupported: Vec<Value> = lock(&self.unsupported)
+            .entries()
+            .into_iter()
+            .map(|e| json!({"kind": e.kind, "count": e.count, "example": e.example}))
+            .collect();
+        json!({
+            "version": env!("CARGO_PKG_VERSION"),
+            "numDocs": self.num_docs(),
+            "uptimeSeconds": self.started.elapsed().as_secs(),
+            "strict": self.strict,
+            "unsupported": unsupported,
+        })
     }
 
     fn read(&self) -> RwLockReadGuard<'_, Store> {
@@ -191,10 +237,15 @@ pub fn serve(core: &Arc<Core>, addr: &str) -> Result<(), Error> {
 }
 
 fn respond(core: &Core, mut request: Request) {
-    let (status, body) = handle(core, &mut request);
+    let (status, body, kinds) = handle(core, &mut request);
     let json_type = Header::from_bytes("Content-Type", "application/json; charset=utf-8");
     let mut response = Response::from_string(body.to_string()).with_status_code(status);
     if let Ok(h) = json_type {
+        response = response.with_header(h);
+    }
+    if !kinds.is_empty()
+        && let Ok(h) = Header::from_bytes("X-Minisolr-Warning", kinds.join(", "))
+    {
         response = response.with_header(h);
     }
     if let Err(e) = request.respond(response) {
@@ -202,7 +253,8 @@ fn respond(core: &Core, mut request: Request) {
     }
 }
 
-fn handle(core: &Core, request: &mut Request) -> (u16, Value) {
+/// Routes one request; also returns the unsupported-feature kinds it used.
+fn handle(core: &Core, request: &mut Request) -> (u16, Value, Vec<String>) {
     let url = request.url().to_owned();
     let (path, query) = url.split_once('?').unwrap_or((url.as_str(), ""));
     let post = *request.method() == Method::Post;
@@ -221,7 +273,27 @@ fn handle(core: &Core, request: &mut Request) -> (u16, Value) {
         body: &body,
         json_body,
     };
-    route(core, &request)
+    let _ = warn::take();
+    let (mut status, mut out) = route(core, &request);
+    let noted = warn::take();
+    if !noted.is_empty() {
+        let mut described = format!("{path}?{query}");
+        if !body.is_empty() {
+            described.push_str(" body=");
+            described.push_str(&body);
+        }
+        core.record_unsupported(&noted, &described);
+        if core.strict && status == 200 {
+            let what: Vec<String> = noted.iter().map(|(k, d)| format!("[{k}] {d}")).collect();
+            let msg = format!(
+                "minisolr strict mode: unsupported feature {}",
+                what.join("; ")
+            );
+            eprintln!("error: 400 {msg}");
+            (status, out) = (400, bad_request_body(&msg, 0));
+        }
+    }
+    (status, out, noted.into_iter().map(|(k, _)| k).collect())
 }
 
 /// A request as the router sees it.
@@ -254,6 +326,9 @@ impl HttpRequest<'_> {
 #[must_use]
 pub fn route(core: &Core, request: &HttpRequest<'_>) -> (u16, Value) {
     let path = request.path.trim_end_matches('/');
+    if path == "/minisolr/status" {
+        return (200, core.status());
+    }
     let Some(handler) = path.strip_prefix("/solr/") else {
         return not_found(path);
     };
@@ -308,7 +383,7 @@ pub fn route(core: &Core, request: &HttpRequest<'_>) -> (u16, Value) {
             with_index(core, |idx| get(idx, &params))
         }
         "mlt" => {
-            eprintln!("warning: UNSUPPORTED (ignored): /mlt returns no results");
+            warn::note("handler:mlt", "/mlt returns no results");
             (
                 200,
                 json!({"responseHeader": {"status": 0, "QTime": 0}, "response": {"numFound": 0, "start": 0, "docs": []}}),
@@ -326,7 +401,7 @@ pub fn route(core: &Core, request: &HttpRequest<'_>) -> (u16, Value) {
 }
 
 fn not_found(path: &str) -> (u16, Value) {
-    eprintln!("warning: unsupported path {path}");
+    warn::note(&format!("path:{path}"), "no such path");
     (
         404,
         json!({"error": {"code": 404, "msg": format!("not found: {path}")}}),
@@ -348,7 +423,7 @@ fn with_index(core: &Core, f: impl FnOnce(&Index) -> (u16, Value)) -> (u16, Valu
 
 /// A Solr-shaped `/select` (or `/export`) response from `run`; a request real Solr
 /// rejects ([`Error::BadRequest`]) becomes its HTTP 400 error, an unsupported one an
-/// empty result with a `warning` in the header. `nextCursorMark`,
+/// empty result with a `warning` in the header (and the feature counted by [`warn`]). `nextCursorMark`,
 /// `facet_counts` and `facets` are added when the selection has them.
 pub fn select_response(
     params: &Params,
@@ -365,10 +440,11 @@ pub fn select_response(
         return (400, bad_request_body(msg, started.elapsed().as_millis()));
     }
     let selection = result.unwrap_or_else(|e| {
-        eprintln!(
-            "warning: UNSUPPORTED (ignored): {e}; q={:?}",
-            params.get("q").unwrap_or_default()
-        );
+        if let Error::Unsupported(msg) = &e {
+            warn::note(&warn::kind_of(msg), &e.to_string());
+        } else {
+            eprintln!("error: {e}");
+        }
         warning = Some(e.to_string());
         Selection::empty()
     });

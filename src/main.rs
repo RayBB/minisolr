@@ -11,18 +11,24 @@ use minisolr::server::{Core, serve};
 use minisolr::store::Store;
 use serde_json::Value;
 
-const USAGE: &str = "usage:\n  minisolr serve <conf-dir> <data-dir | docs.jsonl> [addr=127.0.0.1:8983]\n  minisolr parity <conf-dir> <tokens.jsonl>\n  minisolr ping [addr=127.0.0.1:8983]\n\n<conf-dir> holds managed-schema.xml and enumsConfig.xml. A data directory (created if\nmissing) persists updates in <data-dir>/docs.jsonl; a .jsonl file is loaded and updates\nstay in memory. `ping` exits 0 if the server at addr answers its ping (a healthcheck).";
+const USAGE: &str = "usage:\n  minisolr serve [--strict] <conf-dir> <data-dir | docs.jsonl> [addr=127.0.0.1:8983]\n  minisolr parity <conf-dir> <tokens.jsonl>\n  minisolr ping [addr=127.0.0.1:8983]\n\n<conf-dir> holds managed-schema.xml and enumsConfig.xml. A data directory (created if\nmissing) persists updates in <data-dir>/docs.jsonl; a .jsonl file is loaded and updates\nstay in memory. --strict (or MINISOLR_STRICT=1) answers HTTP 400 for\nrequests that use unsupported features instead of an empty or partial result. `ping` exits 0 if the server at addr answers its ping (a healthcheck).";
 
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    let mut strict =
+        std::env::var("MINISOLR_STRICT").is_ok_and(|v| !matches!(v.as_str(), "" | "0"));
+    if args.first().is_some_and(|a| a == "serve") && args.iter().any(|a| a == "--strict") {
+        args.retain(|a| a != "--strict");
+        strict = true;
+    }
     let result = match args
         .iter()
         .map(String::as_str)
         .collect::<Vec<_>>()
         .as_slice()
     {
-        ["serve", conf, docs] => run_serve(conf, docs, "127.0.0.1:8983"),
-        ["serve", conf, docs, addr] => run_serve(conf, docs, addr),
+        ["serve", conf, docs] => run_serve(conf, docs, "127.0.0.1:8983", strict),
+        ["serve", conf, docs, addr] => run_serve(conf, docs, addr, strict),
         ["parity", conf, tokens] => parity(conf, Path::new(tokens)),
         ["ping"] => minisolr::ping::ping("127.0.0.1:8983"),
         ["ping", addr] => minisolr::ping::ping(addr),
@@ -37,7 +43,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn run_serve(conf: &str, data: &str, addr: &str) -> Result<(), Error> {
+fn run_serve(conf: &str, data: &str, addr: &str, strict: bool) -> Result<(), Error> {
     let schema = Arc::new(Schema::load(Path::new(conf))?);
     let warnings = schema.analysis_warnings();
     if !warnings.is_empty() {
@@ -56,7 +62,10 @@ fn run_serve(conf: &str, data: &str, addr: &str) -> Result<(), Error> {
         std::fs::create_dir_all(data)?;
         Store::open(Arc::clone(&schema), data)?
     };
-    serve(&Arc::new(Core::new(store, schema)), addr)
+    serve(
+        &Arc::new(Core::new(store, schema).with_strict(strict)),
+        addr,
+    )
 }
 
 /// Compares Rust tokens with Python's, dumped as JSON lines of `{"field" or "type",

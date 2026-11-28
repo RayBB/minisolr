@@ -21,5 +21,6 @@ pub mod snowball;
 pub mod store;
 pub mod unicode;
 pub mod update;
+pub mod warn;
 
 pub use error::Error;

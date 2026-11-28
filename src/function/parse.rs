@@ -51,7 +51,10 @@ fn parse_at<'a>(expr: &'a str, params: &'a Params, depth: usize) -> Expr<'a> {
         "exists" => Expr::Exists(args.first().map_or("", |a| a.trim())),
         _ => {
             let Some(func) = Func::from_name(name) else {
-                eprintln!("warning: UNSUPPORTED (ignored): function {name}(), evaluates to 0");
+                crate::warn::note(
+                    &format!("function:{name}"),
+                    &format!("function {name}() evaluates to 0"),
+                );
                 return Expr::Unknown(name);
             };
             let args = args.into_iter().map(|a| parse_at(a, params, depth + 1));

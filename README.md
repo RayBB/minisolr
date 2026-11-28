@@ -126,7 +126,17 @@ Spellcheck (`spellcheck=true`), as Python's `spellcheck`: the words of `spellche
 
 `cursorMark`: as Python, `*` starts at 0, `o:<n>` at offset `n`, and `nextCursorMark` is `o:<start + returned>` (the cursor itself once a page is empty). No sort on the uniqueKey is required; ties break in index order, so pages are stable while the store does not change.
 
-A bare term with no default field, a range on a text field, an unknown `{!type}`, malformed local params, a `json.facet` URL parameter and grouping return an empty result with a `warning` in `responseHeader` and a line on stderr. An undefined field answers HTTP 400 like real Solr (see Limits). A field the schema defines but no document has matches nothing.
+A bare term with no default field, a range on a text field, an unknown `{!type}`, malformed local params, a `json.facet` URL parameter and grouping return an empty result with a `warning` in `responseHeader`. Every unsupported request is also counted by kind, logged on stderr, listed by `/minisolr/status` and named in an `X-Minisolr-Warning` response header (see "When something looks wrong"). An undefined field answers HTTP 400 like real Solr (see Limits). A field the schema defines but no document has matches nothing.
+
+## When something looks wrong
+
+A request that uses something minisolr does not support (an unknown function, `facet.range`, `facet.pivot`, `facet.interval`, `mlt`, a JSON facet type other than `sum` and `terms`, an unknown `{!type}`, a bare term with no default field, a range on a text field, grouping, `/mlt`, an unknown path) can come back empty or incomplete. minisolr never hides this:
+
+- The response carries `X-Minisolr-Warning: <kinds>` (for example `facet.range, function:foo`), and for an unanswerable search `responseHeader.warning` too.
+- The first request of each kind is logged on stderr as `UNSUPPORTED [kind] first seen: ...; request: ...`, with the request parameters; later ones only at the 10th, 100th, 1000th use. In Open Library's dev stack: `docker compose logs solr | grep UNSUPPORTED`.
+- `curl localhost:8983/minisolr/status` returns the version, the number of docs, the uptime and `unsupported`: each kind with its count and the first request that used it. (`/solr/openlibrary/admin/ping`, the healthcheck, is unchanged.)
+- Strict mode turns these into errors: start with `MINISOLR_STRICT=1` (or `minisolr serve --strict ...`) and a request that uses an unsupported feature answers HTTP 400, in Solr's error shape, naming the kind in `error.msg`. The default stays non-strict. In a compose file, add `MINISOLR_STRICT: "1"` to the `solr` service's `environment`.
+- If real Solr is what you need, switch back with `curl -fsSL https://raw.githubusercontent.com/RayBB/minisolr/main/install.sh | sh -s off` and reindex.
 
 ## Analyzers
 

@@ -282,7 +282,7 @@ fn execute(
         None
     };
     if params.get("mlt") == Some("true") {
-        eprintln!("warning: UNSUPPORTED (ignored): mlt=true (MoreLikeThis) is not implemented");
+        crate::warn::note("mlt", "mlt=true (MoreLikeThis) is not implemented");
     }
     let facet_counts = if facets_wanted {
         Some(facet::facet_counts(store, &found.all, params)?)

@@ -154,7 +154,7 @@ pub(crate) fn facet_counts(store: &Index, hits: &[usize], params: &Params) -> Re
             name.as_str(),
             "facet.range" | "facet.pivot" | "facet.interval"
         ) {
-            eprintln!("warning: UNSUPPORTED (ignored): {name}");
+            crate::warn::note(name, &format!("{name} is ignored"));
         }
     }
     Ok(json!({
@@ -182,7 +182,7 @@ pub(crate) fn json_facets(store: &Index, hits: &[usize], spec: &Value) -> Result
     let mut out = Map::new();
     out.insert("count".into(), Value::from(hits.len()));
     let Some(spec) = spec.as_object() else {
-        eprintln!("warning: UNSUPPORTED (ignored): json.facet that is not an object");
+        crate::warn::note("json.facet:not-object", "json.facet is not an object");
         return Ok(Value::Object(out));
     };
     for (name, agg) in spec {
@@ -192,12 +192,15 @@ pub(crate) fn json_facets(store: &Index, hits: &[usize], spec: &Value) -> Result
                     store.require_defined(field)?;
                     out.insert(name.clone(), sum(store, hits, field));
                 }
-                _ => eprintln!("warning: UNSUPPORTED (ignored): json.facet aggregation {text:?}"),
+                _ => crate::warn::note(
+                    "json.facet:aggregation",
+                    &format!("json.facet aggregation {text:?}"),
+                ),
             },
             Value::Object(o) if o.get("type").and_then(Value::as_str) == Some("terms") => {
                 out.insert(name.clone(), terms(store, hits, o)?);
             }
-            _ => eprintln!("warning: UNSUPPORTED (ignored): json.facet type in {name:?}"),
+            _ => crate::warn::note("json.facet:type", &format!("json.facet type in {name:?}")),
         }
     }
     Ok(Value::Object(out))
