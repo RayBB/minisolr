@@ -50,10 +50,15 @@ mod tests {
         let addr = listener.local_addr().unwrap().to_string();
         let handle = std::thread::spawn(move || {
             let (mut conn, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(conn.try_clone().unwrap());
             let mut line = String::new();
-            BufReader::new(conn.try_clone().unwrap())
-                .read_line(&mut line)
-                .unwrap();
+            reader.read_line(&mut line).unwrap();
+            // Read the whole request: closing with unread input resets the connection
+            // and the client can lose the reply.
+            let mut header = String::new();
+            while reader.read_line(&mut header).unwrap() > 2 {
+                header.clear();
+            }
             conn.write_all(reply.as_bytes()).unwrap();
             line
         });
