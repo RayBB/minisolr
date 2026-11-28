@@ -183,7 +183,7 @@ Correctness on the captured Open Library requests (`tools/replay.py`): all 267 a
 
 ## Limits
 
-As in Python: MoreLikeThis returns nothing (`/mlt` is empty, `mlt=true` is ignored), highlighting returns whole values rather than fragments, spellcheck has no collations, analyzer components Python lacks are skipped, and JSON facets stop at `sum` and `terms` (no nested facets, `avg`, `min`, `max`, `unique`); the whole store file is rewritten on every update request and the index is rebuilt in full after a change. Unlike Python, a query clause on an undefined field (or another feature Python only warns about inside a query) makes the whole request return an empty result with a `warning`, where Python drops just that clause.
+As in Python: MoreLikeThis returns nothing (`/mlt` is empty, `mlt=true` is ignored), highlighting returns whole values rather than fragments, spellcheck has no collations, analyzer components Python lacks are skipped, and JSON facets stop at `sum` and `terms` (no nested facets, `avg`, `min`, `max`, `unique`); the whole store file is rewritten on every update request and the index is rebuilt in full after a change. Unlike Python, a query clause on an undefined field (or another feature Python only warns about inside a query) makes the whole request return an empty result with a `warning`, where Python logs the warning and treats just that clause as matching nothing (so `title:x OR nosuch:y` still returns the `title:x` hits).
 
 ## Credits and license
 
