@@ -1,11 +1,11 @@
-# Compose override that replaces Open Library's `solr` service with minisolr-rs (dev only).
-#   docker compose -f compose.yaml -f compose.override.yaml -f /path/to/minisolr-rs/compose.minisolr-rs.yaml up
-# Set MINISOLR_RS_DIR to this directory when it lives outside the Open Library checkout (see README).
+# Compose override that replaces Open Library's `solr` service with minisolr (dev only).
+#   docker compose -f compose.yaml -f compose.override.yaml -f /path/to/minisolr/compose.minisolr.yaml up
+# Set MINISOLR_DIR to this directory when it lives outside the Open Library checkout (see README).
 services:
   solr:
-    image: minisolr-rs:dev
+    image: minisolr:dev
     build:
-      context: ${MINISOLR_RS_DIR:-./minisolr-rs}
+      context: ${MINISOLR_DIR:-./minisolr}
     command: !reset null
     # The image has no init; docker-init forwards SIGTERM so stop and restart are immediate.
     # Every update request is saved (fsync, then rename) before it is answered, so a stop never loses committed data.
@@ -13,13 +13,13 @@ services:
     environment: !reset []
     volumes: !override
       - ./conf/solr/conf:/conf:ro
-      - minisolr-rs-data:/data
+      - minisolr-data:/data
     healthcheck: !override
-      test: ["CMD", "/minisolr-rs", "ping"]
+      test: ["CMD", "/minisolr", "ping"]
       interval: 10s
       timeout: 5s
       start_period: 30s
       start_interval: 1s
       retries: 6
 volumes:
-  minisolr-rs-data:
+  minisolr-data:

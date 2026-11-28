@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Run all of Python minisolr's e2e feature probes (e2e/probes.py) against a minisolr-rs server, as the Docker harness does.
+"""Run all of Python minisolr's e2e feature probes (e2e/probes.py) against a minisolr server, as the Docker harness does.
 
-    python3 tools/probes_compare.py . --binary target/release/minisolr-rs   # starts its own server
+    python3 tools/probes_compare.py . --binary target/release/minisolr   # starts its own server
     python3 tools/probes_compare.py . --url http://127.0.0.1:8983/solr/openlibrary
 
 It imports `e2e/probes.py`, points `probes.BASE` at the server and calls `probes.compare()`, which runs every probe
@@ -51,7 +51,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("minisolr", type=Path, help="Python minisolr checkout (conf/, fixtures/, e2e/)")
     group = ap.add_mutually_exclusive_group(required=True)
-    group.add_argument("--binary", type=Path, help="minisolr-rs binary to start on a copy of the fixtures")
+    group.add_argument("--binary", type=Path, help="minisolr binary to start on a copy of the fixtures")
     group.add_argument("--url", help="base URL of a running server, e.g. http://127.0.0.1:8983/solr/openlibrary")
     args = ap.parse_args()
     minisolr = args.minisolr.resolve()

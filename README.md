@@ -1,4 +1,4 @@
-# minisolr-rs
+# minisolr
 
 A small Solr stand-in for Open Library development, written in Rust on [Tantivy](https://github.com/quickwit-oss/tantivy). It answers the Solr requests Open Library's dev stack makes (`make reindex-solr`, the site, the `solr-updater` daemon) from a 7.67 MB image that idles at about 5 MiB of RAM, where real Solr needs about 250 MiB. It began as a port of a Python prototype that has since been retired. [PORTING.md](PORTING.md) records how it was built and measured.
 
@@ -7,9 +7,9 @@ A small Solr stand-in for Open Library development, written in Rust on [Tantivy]
 From your Open Library checkout:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/RayBB/minisolr-rs/main/install.sh | sh          # use minisolr-rs
+curl -fsSL https://raw.githubusercontent.com/RayBB/minisolr/main/install.sh | sh          # use minisolr
 docker compose up -d && docker compose run --rm home make reindex-solr
-curl -fsSL https://raw.githubusercontent.com/RayBB/minisolr-rs/main/install.sh | sh -s off   # back to real Solr
+curl -fsSL https://raw.githubusercontent.com/RayBB/minisolr/main/install.sh | sh -s off   # back to real Solr
 ```
 
 `install.sh` downloads one compose file to `~/.minisolr/` and sets `COMPOSE_FILE` in Open Library's git-ignored `.env`; nothing tracked in the checkout changes. The engines use separate data volumes, so reindex after switching. Needs Docker Compose 2.24 or newer.
@@ -26,21 +26,21 @@ cargo test --release
 python3 tools/check.py   # replay the captured Open Library requests and the 82 probes; the CI gate
 ```
 
-The first argument is a Solr conf directory with `managed-schema.xml` (and optionally `enumsConfig.xml`). The second is the data directory (created if missing): the store is loaded from `<dir>/docs.jsonl` and saved there after every update request that changes something, in the same format as Python minisolr, so either server can open the other's directory. Given a `.jsonl` file instead, the server loads it and keeps updates in memory only. `minisolr-rs ping [addr]` exits 0 when the server at `addr` (default `127.0.0.1:8983`) answers `/solr/openlibrary/admin/ping`; the image uses it as its healthcheck.
+The first argument is a Solr conf directory with `managed-schema.xml` (and optionally `enumsConfig.xml`). The second is the data directory (created if missing): the store is loaded from `<dir>/docs.jsonl` and saved there after every update request that changes something, in the same format as Python minisolr, so either server can open the other's directory. Given a `.jsonl` file instead, the server loads it and keeps updates in memory only. `minisolr ping [addr]` exits 0 when the server at `addr` (default `127.0.0.1:8983`) answers `/solr/openlibrary/admin/ping`; the image uses it as its healthcheck.
 
 ## Pull the published image
 
 Every push to `main` builds a multi-architecture (amd64 and arm64) image and publishes it to GitHub Container Registry; a release tag such as `v1.2.3` adds version tags.
 
 ```bash
-docker pull ghcr.io/raybb/minisolr-rs:latest
+docker pull ghcr.io/raybb/minisolr:latest
 ```
 
 To run Open Library's dev stack on it with no clone and no local build, download one compose file and use it as the `solr` override (needs Docker Compose 2.24 or newer):
 
 ```bash
 cd ~/workspace/openlibrary
-curl -O https://raw.githubusercontent.com/RayBB/minisolr-rs/main/compose.ghcr.yaml
+curl -O https://raw.githubusercontent.com/RayBB/minisolr/main/compose.ghcr.yaml
 docker compose -f compose.yaml -f compose.override.yaml -f compose.ghcr.yaml up -d
 docker compose -f compose.yaml -f compose.override.yaml -f compose.ghcr.yaml run --rm home make reindex-solr
 ```
@@ -51,14 +51,14 @@ To make plain `docker compose up` use it, put `COMPOSE_FILE=compose.yaml:compose
 
 The `Dockerfile` builds a static musl binary in `rust:1-alpine` (two compile jobs, dependencies in their own cached layer) and copies it into a `scratch` image of about 8 MB. The container reads the schema from `/conf`, keeps its documents in `/data/docs.jsonl` and listens on port 8983.
 
-`compose.minisolr-rs.yaml` replaces Open Library's `solr` service with it, as Python minisolr's `compose.minisolr.yaml` does. In the Open Library checkout, add two lines to `.env`:
+`compose.minisolr.yaml` replaces Open Library's `solr` service with it, as Python minisolr's `compose.minisolr.yaml` does. In the Open Library checkout, add two lines to `.env`:
 
 ```bash
-MINISOLR_RS_DIR=/path/to/minisolr-rs
-COMPOSE_FILE=compose.yaml:compose.override.yaml:/path/to/minisolr-rs/compose.minisolr-rs.yaml
+MINISOLR_DIR=/path/to/minisolr
+COMPOSE_FILE=compose.yaml:compose.override.yaml:/path/to/minisolr/compose.minisolr.yaml
 ```
 
-Then `docker compose up -d` and `docker compose run --rm home make reindex-solr` as usual. To go back to real Solr, remove both lines. The engines use separate volumes (`minisolr-rs-data`, `solr-data`), so reindex after switching. The service runs with `init: true` so stops are immediate; every update request is written to disk (fsync, then rename) before it is answered, so a stop or restart never loses committed documents.
+Then `docker compose up -d` and `docker compose run --rm home make reindex-solr` as usual. To go back to real Solr, remove both lines. The engines use separate volumes (`minisolr-data`, `solr-data`), so reindex after switching. The service runs with `init: true` so stops are immediate; every update request is written to disk (fsync, then rename) before it is answered, so a stop or restart never loses committed documents.
 
 The end-to-end harness runs the complete Open Library dev stack on this image (reindex, smoke test, replay, restart, probes, the real `solr-updater`); it needs an Open Library checkout and Docker:
 
@@ -79,7 +79,7 @@ python3 tools/replay.py http://127.0.0.1:8983/solr/openlibrary fixtures [--probe
 python3 tools/roundtrip.py load http://127.0.0.1:8984/solr/openlibrary fixtures/docs.jsonl
 python3 tools/roundtrip.py compare http://127.0.0.1:8983/solr/openlibrary http://127.0.0.1:8984/solr/openlibrary fixtures
 # all 66 e2e probes through e2e/probes.py's compare(), on a server started from a copy of the fixtures
-python3 tools/probes_compare.py . --binary target/release/minisolr-rs   # or --url http://...
+python3 tools/probes_compare.py . --binary target/release/minisolr   # or --url http://...
 # memory and latency over the answerable requests
 python3 tools/bench.py http://127.0.0.1:8983/solr/openlibrary <pid> answered.json 1300
 # regenerate the Unicode tables from Python's unicodedata
@@ -136,7 +136,7 @@ A bare term with no default field, a range on a text field, an unknown `{!type}`
 
 `e2e/harness.py all-minisolr --down` with this compose override, two complete runs, every checklist item PASS in both: `make reindex-solr` 446 documents (35 works, 68 editions, 34 authors through the JSON Request/Facet API, 309 subjects), site smoke test 86/86, replay `numFound` 267/267, top-10 overlap 98.76%, facets 6/6, `/get` 41/41, the same after `docker compose restart solr`, probes 66/66 against real Solr (the same 10 soft notes as Python), and the real `solr-updater` daemon (an edited work and a new list searchable after 9 s, a deleted list gone).
 
-| | minisolr-rs | Python minisolr |
+| | minisolr | Python minisolr |
 |---|---|---|
 | Container memory idle after restart (`docker stats`) | 3.5-3.6 MiB | 38-41 MiB |
 | after 1,335 replayed selects | 4.7-4.9 MiB | 42-43 MiB |

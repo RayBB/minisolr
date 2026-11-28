@@ -6,9 +6,9 @@ use std::path::Path;
 use std::thread;
 use std::time::Duration;
 
-use minisolr_rs::schema::Schema;
-use minisolr_rs::server::{Core, serve};
-use minisolr_rs::store::Store;
+use minisolr::schema::Schema;
+use minisolr::server::{Core, serve};
+use minisolr::store::Store;
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -250,7 +250,7 @@ fn function_boosts_and_sorts() -> TestResult {
 // One ordered scenario on one server; its steps depend on each other.
 #[allow(clippy::too_many_lines)]
 fn update_lifecycle_and_restart_from_the_data_directory() -> TestResult {
-    let dir = std::env::temp_dir().join(format!("minisolr-rs-http-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("minisolr-http-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir)?;
     let addr = start(&dir)?;

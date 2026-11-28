@@ -18,7 +18,7 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = ROOT / "target" / "release" / "minisolr-rs"
+BINARY = ROOT / "target" / "release" / "minisolr"
 MIN_OVERLAP_PERCENT = 98.0
 
 
@@ -36,7 +36,7 @@ def ratio(out: str, label: str) -> tuple[int, int]:
 
 
 def main() -> int:
-    tmp = Path(tempfile.mkdtemp(prefix="minisolr-rs-check-"))
+    tmp = Path(tempfile.mkdtemp(prefix="minisolr-check-"))
     (tmp / "data").mkdir()
     shutil.copy(ROOT / "fixtures" / "docs.jsonl", tmp / "data" / "docs.jsonl")
     port = free_port()

@@ -167,8 +167,8 @@ def get_engine(default: str = "minisolr") -> str:
 
 
 def minisolr_compose_file() -> Path:
-    """The override that provides the minisolr-rs service; MINISOLR_COMPOSE_FILE selects another implementation."""
-    return Path(os.environ.get("MINISOLR_COMPOSE_FILE") or ROOT / "compose.minisolr-rs.yaml").resolve()
+    """The override that provides the minisolr service; MINISOLR_COMPOSE_FILE selects another implementation."""
+    return Path(os.environ.get("MINISOLR_COMPOSE_FILE") or ROOT / "compose.minisolr.yaml").resolve()
 
 
 def minisolr_dir() -> str:
@@ -194,8 +194,7 @@ def dc(
     env = dict(os.environ)
     env["COMPOSE_FILE"] = compose_files(engine or get_engine())
     env["COMPOSE_PROJECT_NAME"] = PROJECT
-    # compose.minisolr-rs.yaml reads MINISOLR_RS_DIR; MINISOLR_DIR is set too for the Python implementation's compose file
-    env["MINISOLR_DIR"] = env["MINISOLR_RS_DIR"] = minisolr_dir()
+    env["MINISOLR_DIR"] = minisolr_dir()
     env["HOSTNAME"] = ""
     return subprocess.run(
         ["docker", "compose", "--env-file", str(ENV_FILE), *args],

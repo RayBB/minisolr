@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Replay the captured Open Library /select requests against a running server and compare with real Solr.
 
-Standard library only; it starts nothing. Point it at any Solr-compatible core (minisolr-rs,
+Standard library only; it starts nothing. Point it at any Solr-compatible core (minisolr,
 Python minisolr or Solr itself) and at minisolr's fixtures directory:
 
     python3 tools/replay.py http://127.0.0.1:8983/solr/openlibrary fixtures

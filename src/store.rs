@@ -603,7 +603,7 @@ mod tests {
 
     #[test]
     fn save_and_open_round_trip() {
-        let dir = std::env::temp_dir().join(format!("minisolr-rs-store-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("minisolr-store-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let mut s = Store::open(schema(), &dir).expect("open empty");
         assert!(s.is_empty() && s.persistent());
