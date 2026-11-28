@@ -2,7 +2,7 @@
 
 Run with the Python that Python minisolr uses (its Unicode version is the one to match):
 
-    uv run --project ../minisolr python tools/gen_unicode.py > src/unicode/table.rs
+    python3 tools/gen_unicode.py > src/unicode/table.rs
 
 Writes two tables:
 - CLASSES: the general category of every code point, reduced to the classes the analyzers ask about, as

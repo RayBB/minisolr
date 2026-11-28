@@ -1,7 +1,6 @@
 #!/bin/sh
-# Switch an Open Library checkout between real Solr and minisolr (dev only).
+# Switch an Open Library checkout between real Solr and minisolr-rs (dev only).
 #   curl -fsSL https://raw.githubusercontent.com/RayBB/minisolr-rs/main/install.sh | sh          # Rust image (default)
-#   curl -fsSL https://raw.githubusercontent.com/RayBB/minisolr-rs/main/install.sh | sh -s python  # Python image (RayBB/minisolr)
 #   curl -fsSL https://raw.githubusercontent.com/RayBB/minisolr-rs/main/install.sh | sh -s off   # back to Solr
 # Run it from the Open Library checkout (or set OL_DIR). It downloads one compose file to
 # ~/.minisolr/ and sets COMPOSE_FILE in OL's git-ignored .env; nothing else in the checkout changes.
@@ -26,9 +25,8 @@ if [ "$mode" = off ]; then
 fi
 
 case "$mode" in
-    python) repo=minisolr ;;
     rust) repo=minisolr-rs ;;
-    *) echo "Usage: install.sh [python|rust|off]" >&2; exit 1 ;;
+    *) echo "Usage: install.sh [rust|off]" >&2; exit 1 ;;
 esac
 
 dest="$HOME/.minisolr/$repo.compose.yaml"

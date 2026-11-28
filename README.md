@@ -1,6 +1,6 @@
 # minisolr-rs
 
-A small Solr stand-in for Open Library development, written in Rust on [Tantivy](https://github.com/quickwit-oss/tantivy). It answers the Solr requests Open Library's dev stack makes (`make reindex-solr`, the site, the `solr-updater` daemon) from a 7.67 MB image that idles at about 5 MiB of RAM, where real Solr needs about 250 MiB. It began as a port of a Python version, [minisolr](https://github.com/RayBB/minisolr), which remains as the reference implementation. [PORTING.md](PORTING.md) records how it was built and measured.
+A small Solr stand-in for Open Library development, written in Rust on [Tantivy](https://github.com/quickwit-oss/tantivy). It answers the Solr requests Open Library's dev stack makes (`make reindex-solr`, the site, the `solr-updater` daemon) from a 7.67 MB image that idles at about 5 MiB of RAM, where real Solr needs about 250 MiB. It began as a port of a Python prototype that has since been retired. [PORTING.md](PORTING.md) records how it was built and measured.
 
 ## Quick start
 
@@ -12,7 +12,7 @@ docker compose up -d && docker compose run --rm home make reindex-solr
 curl -fsSL https://raw.githubusercontent.com/RayBB/minisolr-rs/main/install.sh | sh -s off   # back to real Solr
 ```
 
-`install.sh` downloads one compose file to `~/.minisolr/` and sets `COMPOSE_FILE` in Open Library's git-ignored `.env`; nothing tracked in the checkout changes. (`sh -s python` selects the Python image instead.) The engines use separate data volumes, so reindex after switching. Needs Docker Compose 2.24 or newer.
+`install.sh` downloads one compose file to `~/.minisolr/` and sets `COMPOSE_FILE` in Open Library's git-ignored `.env`; nothing tracked in the checkout changes. The engines use separate data volumes, so reindex after switching. Needs Docker Compose 2.24 or newer.
 
 ## Run
 
@@ -58,7 +58,7 @@ MINISOLR_RS_DIR=/path/to/minisolr-rs
 COMPOSE_FILE=compose.yaml:compose.override.yaml:/path/to/minisolr-rs/compose.minisolr-rs.yaml
 ```
 
-Then `docker compose up -d` and `docker compose run --rm home make reindex-solr` as usual. To switch back to Python minisolr, point `COMPOSE_FILE` at `compose.minisolr.yaml` (with `MINISOLR_DIR`) instead; to go back to real Solr, remove both lines. The engines use separate volumes (`minisolr-rs-data`, `minisolr-data`, `solr-data`), so reindex after switching. The service runs with `init: true` so stops are immediate; every update request is written to disk (fsync, then rename) before it is answered, so a stop or restart never loses committed documents.
+Then `docker compose up -d` and `docker compose run --rm home make reindex-solr` as usual. To go back to real Solr, remove both lines. The engines use separate volumes (`minisolr-rs-data`, `solr-data`), so reindex after switching. The service runs with `init: true` so stops are immediate; every update request is written to disk (fsync, then rename) before it is answered, so a stop or restart never loses committed documents.
 
 The end-to-end harness runs the complete Open Library dev stack on this image (reindex, smoke test, replay, restart, probes, the real `solr-updater`); it needs an Open Library checkout and Docker:
 
@@ -70,13 +70,11 @@ The repository carries what it is checked against: `conf/` is a copy of Open Lib
 
 ## Tools
 
-All in `tools/`, Python. `replay.py`, `roundtrip.py`, `probes_compare.py` and `bench.py` use the standard library only (`probes_compare.py --binary` starts its own server); `compare_python.py`, `dump_tokens.py`, `synthetic_tokens.py` and `gen_unicode.py` need the Python reference implementation checked out next to this repository as `../minisolr`.
+All in `tools/`, Python. `replay.py`, `roundtrip.py`, `probes_compare.py` and `bench.py` use the standard library only (`probes_compare.py --binary` starts its own server); `gen_unicode.py` regenerates the Unicode tables from Python's `unicodedata`.
 
 ```bash
 # correctness against real Solr's captured answers (the main progress meter)
 python3 tools/replay.py http://127.0.0.1:8983/solr/openlibrary fixtures [--probes] [-v] [--subset-out answered.json]
-# same answers as Python minisolr? (runs Python minisolr in-process; --neutral turns its boosts off)
-uv run --project ../minisolr python tools/compare_python.py http://127.0.0.1:8983/solr/openlibrary . [--neutral]
 # reindex an empty server through /update (works with nested editions, repeated `add` keys), then compare two servers
 python3 tools/roundtrip.py load http://127.0.0.1:8984/solr/openlibrary fixtures/docs.jsonl
 python3 tools/roundtrip.py compare http://127.0.0.1:8983/solr/openlibrary http://127.0.0.1:8984/solr/openlibrary fixtures
@@ -84,14 +82,8 @@ python3 tools/roundtrip.py compare http://127.0.0.1:8983/solr/openlibrary http:/
 python3 tools/probes_compare.py . --binary target/release/minisolr-rs   # or --url http://...
 # memory and latency over the answerable requests
 python3 tools/bench.py http://127.0.0.1:8983/solr/openlibrary <pid> answered.json 1300
-# analyzer parity with Python minisolr, over every text field in the data
-uv run --project ../minisolr python tools/dump_tokens.py conf fixtures/docs.jsonl > tokens.jsonl
-cargo run --release -- parity conf tokens.jsonl
-# the same for index and query tokens of every text field type over a broad synthetic set (optional extra word list)
-uv run --project ../minisolr python tools/synthetic_tokens.py conf fixtures/docs.jsonl [/usr/share/dict/words] > synthetic.jsonl
-cargo run --release -- parity conf synthetic.jsonl
 # regenerate the Unicode tables from Python's unicodedata
-uv run --project ../minisolr python tools/gen_unicode.py > src/unicode/table.rs
+python3 tools/gen_unicode.py > src/unicode/table.rs
 ```
 
 ## Schema
@@ -187,4 +179,4 @@ As in Python: MoreLikeThis returns nothing (`/mlt` is empty, `mlt=true` is ignor
 
 ## Credits and license
 
-MIT, see [LICENSE](LICENSE). The Python reference implementation lives in [minisolr](https://github.com/RayBB/minisolr); only the comparison tools in `tools/` need it, checked out next to this repository as `../minisolr`. Built with Claude Code.
+MIT, see [LICENSE](LICENSE). Built with Claude Code.
